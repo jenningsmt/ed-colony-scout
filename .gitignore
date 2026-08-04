@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.sqlite
+data/sector_library/*.md
+data/source_data/
+data/Journal.*.log
+out/
+build/
+dist/
+dist-installer/

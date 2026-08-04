@@ -1,0 +1,6 @@
+# Runtime dependencies for the colony evaluation pipeline.
+# ijson is required by scripts/extract_sector_systems_to_sqlite.py to stream
+# the Spansh galaxy dump (a JSON-array document); for best performance confirm
+# the compiled C backend is available:
+#   python -c "import ijson; print(ijson.backend)"   # should print yajl2_c
+ijson>=3.2
