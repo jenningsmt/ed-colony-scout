@@ -16,7 +16,7 @@ from typing import Any
 APP_NAME = "EDColonyScout"
 
 # Displayed in the window title.
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 
 def _default_out_dir() -> str:
@@ -43,6 +43,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "galaxy_dump_path": "",
     "sector_prefixes": [],
     "sector_library_dir": _default_sector_library_dir(),
+    # -- Path Finder tab --
+    "pf_origin_system": "",
+    "pf_target_system": "",
+    "pf_max_jump_ly": 15.0,
+    "pf_any_hops": True,  # separate toggle; pf_max_hops keeps its last value even while this is True
+    "pf_max_hops": 20,
+    "pf_candidate_count": 10,
 }
 
 

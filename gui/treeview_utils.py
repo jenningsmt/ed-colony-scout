@@ -76,3 +76,17 @@ def load_csv_into_tree(tree: ttk.Treeview, csv_path: Path) -> None:
         for row in reader:
             values = [row.get(col, "") for col in columns]
             tree.insert("", "end", values=values)
+
+
+def load_dicts_into_tree(tree: ttk.Treeview, rows: list[dict]) -> None:
+    """Same row-insertion logic as load_csv_into_tree, but from in-memory
+    dicts rather than a CSV file -- for results that arrive via a
+    JSON-sentinel mechanism instead of a written CSV. Callers are
+    responsible for pre-formatting display values (Yes/No, "unreachable",
+    etc.) before calling this, same division of labor as load_csv_into_
+    tree's raw-string CSV values."""
+    tree.delete(*tree.get_children())
+    columns = tree["columns"]
+    for row in rows:
+        values = [row.get(col, "") for col in columns]
+        tree.insert("", "end", values=values)

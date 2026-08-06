@@ -12,12 +12,13 @@ cancel_event is passed straight through.
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from gui import rubric as rubric_module
-from scripts import colonization_reachability_export, extract_multi_sector_to_sqlite
+from scripts import colonization_reachability_export, extract_multi_sector_to_sqlite, path_finder_export
 
 # Extends worker.py's DONE_SENTINEL convention with out-of-band result
 # lines: printed (and so queued via the worker's stdout redirect) right
@@ -31,6 +32,12 @@ RESULT_SEP = "|"
 
 EXTRACT_RESULT_SENTINEL = "__extraction_result__"
 EXTRACT_RESULT_SEP = "|"
+
+# Path Finder's two query modes return richer, variable-shaped results (a
+# hop-by-hop path, or a candidate list plus a possible path) than a pair of
+# CSV paths, so they're relayed as one JSON blob under a single sentinel
+# rather than a delimited string.
+PATH_RESULT_SENTINEL = "__path_result__"
 
 
 def _cancelled(cancel_event: Optional[threading.Event]) -> bool:
@@ -145,4 +152,112 @@ def run_sector_extraction_pipeline(
         for p in prefixes
     ]
     print(f"{EXTRACT_RESULT_SENTINEL}:{EXTRACT_RESULT_SEP.join(db_paths)}")
+    return 0
+
+
+def run_shortest_path_pipeline(
+    config: dict[str, Any],
+    cancel_event: Optional[threading.Event] = None,
+    confirm_cb: Optional[Callable[[dict], bool]] = None,
+) -> int:
+    """Validates config, runs path_finder_export.shortest_path(), and on
+    success prints a PATH_RESULT_SENTINEL line carrying the JSON-serialized
+    result dict."""
+    db_paths_raw = list(config.get("db_paths") or [])
+    origin_system = str(config.get("pf_origin_system") or "").strip()
+    target_system = str(config.get("pf_target_system") or "").strip()
+
+    if not db_paths_raw:
+        print("ERROR: at least one sector DB is required.")
+        return 1
+    missing = [p for p in db_paths_raw if not Path(p).exists()]
+    if missing:
+        print(f"ERROR: sector DB(s) not found: {', '.join(missing)}")
+        return 1
+    if not origin_system:
+        print("ERROR: origin system is required.")
+        return 1
+    if not target_system:
+        print("ERROR: target system is required.")
+        return 1
+
+    if _cancelled(cancel_event):
+        print("Cancelled before starting.")
+        return 130
+
+    out_dir = Path(str(config.get("out_dir") or "out"))
+    max_jump_ly = float(config.get("pf_max_jump_ly", 15.0))
+
+    try:
+        result = path_finder_export.shortest_path(
+            db_paths=[Path(p) for p in db_paths_raw],
+            origin_system=origin_system,
+            target_system=target_system,
+            max_jump_ly=max_jump_ly,
+            out_dir=out_dir,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+    if _cancelled(cancel_event):
+        print("Cancelled after the search finished; results will not be loaded.")
+        return 130
+
+    print(f"{PATH_RESULT_SENTINEL}:{json.dumps(result)}")
+    return 0
+
+
+def run_check_reachable_pipeline(
+    config: dict[str, Any],
+    cancel_event: Optional[threading.Event] = None,
+    confirm_cb: Optional[Callable[[dict], bool]] = None,
+) -> int:
+    """Validates config, runs path_finder_export.check_reachable(), and on
+    success prints a PATH_RESULT_SENTINEL line carrying the JSON-serialized
+    result dict. Named run_check_reachable_pipeline (not run_reachable_
+    pipeline) to stay visually distinct from the pre-existing
+    run_reachability_pipeline in this same module."""
+    db_paths_raw = list(config.get("db_paths") or [])
+    target_system = str(config.get("pf_target_system") or "").strip()
+
+    if not db_paths_raw:
+        print("ERROR: at least one sector DB is required.")
+        return 1
+    missing = [p for p in db_paths_raw if not Path(p).exists()]
+    if missing:
+        print(f"ERROR: sector DB(s) not found: {', '.join(missing)}")
+        return 1
+    if not target_system:
+        print("ERROR: target system is required.")
+        return 1
+
+    if _cancelled(cancel_event):
+        print("Cancelled before starting.")
+        return 130
+
+    out_dir = Path(str(config.get("out_dir") or "out"))
+    max_jump_ly = float(config.get("pf_max_jump_ly", 15.0))
+    any_hops = bool(config.get("pf_any_hops", True))
+    max_hops = None if any_hops else int(config.get("pf_max_hops", 20))
+    candidate_count = int(config.get("pf_candidate_count", 10))
+
+    try:
+        result = path_finder_export.check_reachable(
+            db_paths=[Path(p) for p in db_paths_raw],
+            target_system=target_system,
+            max_jump_ly=max_jump_ly,
+            max_hops=max_hops,
+            candidate_count=candidate_count,
+            out_dir=out_dir,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+    if _cancelled(cancel_event):
+        print("Cancelled after the search finished; results will not be loaded.")
+        return 130
+
+    print(f"{PATH_RESULT_SENTINEL}:{json.dumps(result)}")
     return 0

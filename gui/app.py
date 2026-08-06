@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import tkinter as tk
 from pathlib import Path
@@ -51,6 +52,23 @@ DENSEST_COLUMNS = [
     ColumnSpec("metallic_icy_rings", "Metallic/Icy Rings", 350, False, "w"),
 ]
 
+PF_PATH_COLUMNS = [
+    ColumnSpec("hop", "Hop", 50, True, "e"),
+    ColumnSpec("system_name", "System", 220, False, "w"),
+    ColumnSpec("leg_distance_ly", "Leg Dist (ly)", 100, True, "e"),
+    ColumnSpec("occupied", "Occupied?", 90, False, "center"),
+    ColumnSpec("x", "X", 70, True, "e"),
+    ColumnSpec("y", "Y", 70, True, "e"),
+    ColumnSpec("z", "Z", 70, True, "e"),
+]
+
+PF_CANDIDATES_COLUMNS = [
+    ColumnSpec("system_name", "System", 220, False, "w"),
+    ColumnSpec("straight_line_ly", "Straight-line (ly)", 130, True, "e"),
+    ColumnSpec("hop_count", "Hops", 90, True, "e"),
+    ColumnSpec("within_cap", "Within Cap?", 90, False, "center"),
+]
+
 ORIGIN_HELP_TEXT = (
     "Origin System defines the starting point of the reachability search.\n\n"
     "This app finds every system reachable via a CHAIN of jumps, where each "
@@ -74,7 +92,11 @@ class App:
         self.config: dict[str, Any] = config_module.load_config()
         self._pending_result_paths: Optional[tuple[Path, Path]] = None
         self._pending_extracted_db_paths: Optional[list[str]] = None
+        self._pending_path_result: Optional[dict] = None
+        self._pending_path_mode: Optional[str] = None
         self._search_after_id: Optional[str] = None
+        self._pf_origin_search_after_id: Optional[str] = None
+        self._pf_target_search_after_id: Optional[str] = None  # shared: sp/rc target combos are never both mapped at once
         # self._last_auto_sector_label is set in _build_run_tab, once the
         # persisted db_paths are known (see the comment there for why).
 
@@ -90,17 +112,20 @@ class App:
 
         self.prep_tab = ttk.Frame(self.notebook)
         self.run_tab = ttk.Frame(self.notebook)
+        self.path_finder_tab = ttk.Frame(self.notebook)
         self.candidates_tab = ttk.Frame(self.notebook)
         self.dense_tab = ttk.Frame(self.notebook)
         self.settings_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.prep_tab, text="Prep Sectors")
         self.notebook.add(self.run_tab, text="Run")
+        self.notebook.add(self.path_finder_tab, text="Path Finder")
         self.notebook.add(self.candidates_tab, text="Candidates")
         self.notebook.add(self.dense_tab, text="Densest Systems")
         self.notebook.add(self.settings_tab, text="Settings")
 
         self._build_prep_tab(self.prep_tab)
         self._build_run_tab(self.run_tab)
+        self._build_path_finder_tab(self.path_finder_tab)
         self.candidates_tree = treeview_utils.build_tree(self.candidates_tab, CANDIDATES_COLUMNS)
         self.dense_tree = treeview_utils.build_tree(self.dense_tab, DENSEST_COLUMNS)
         self._build_settings_tab(self.settings_tab)
@@ -300,7 +325,10 @@ class App:
         ttk.Label(origin_row, text="System name:").pack(side="left")
         self.origin_combo = ttk.Combobox(origin_row, textvariable=self.origin_system_var, width=45)
         self.origin_combo.pack(side="left", padx=(6, 0), fill="x", expand=True)
-        self.origin_combo.bind("<KeyRelease>", self._schedule_origin_search)
+        self.origin_combo.bind(
+            "<KeyRelease>",
+            lambda _e: self._schedule_system_search(self.origin_combo, self.origin_system_var, "_search_after_id"),
+        )
         ttk.Button(origin_row, text="?", width=2, command=self._show_origin_help).pack(side="left", padx=(6, 0))
         ttk.Label(
             origin_frame,
@@ -375,16 +403,19 @@ class App:
         self.sector_label_var.set(derived)
         self._last_auto_sector_label = derived
 
-    def _schedule_origin_search(self, _event: Any = None) -> None:
-        if self._search_after_id is not None:
-            self.root.after_cancel(self._search_after_id)
-        self._search_after_id = self.root.after(SEARCH_DEBOUNCE_MS, self._run_origin_search)
+    def _schedule_system_search(self, combo: ttk.Combobox, var: tk.StringVar, after_attr: str) -> None:
+        after_id = getattr(self, after_attr)
+        if after_id is not None:
+            self.root.after_cancel(after_id)
+        setattr(self, after_attr, self.root.after(
+            SEARCH_DEBOUNCE_MS, lambda: self._run_system_search(combo, var, after_attr)
+        ))
 
-    def _run_origin_search(self) -> None:
-        self._search_after_id = None
+    def _run_system_search(self, combo: ttk.Combobox, var: tk.StringVar, after_attr: str) -> None:
+        setattr(self, after_attr, None)
         db_paths = list(self.db_listbox.get(0, "end"))
-        matches = db_lookup.search_system_names(db_paths, self.origin_system_var.get(), limit=50)
-        self.origin_combo["values"] = matches
+        matches = db_lookup.search_system_names(db_paths, var.get(), limit=50)
+        combo["values"] = matches
 
     def _show_origin_help(self) -> None:
         messagebox.showinfo("Origin System", ORIGIN_HELP_TEXT)
@@ -401,6 +432,307 @@ class App:
 
     def _show_rubric_help(self) -> None:
         messagebox.showinfo("How Scoring Works", rubric_module.format_rubric_help(self.scoring_rubric))
+
+    # ------------------------------------------------------------------
+    # Path Finder tab
+    # ------------------------------------------------------------------
+    def _build_path_finder_tab(self, parent: ttk.Frame) -> None:
+        ttk.Label(
+            parent, text="Uses the same sector DB selection as the Run tab.", foreground="#666666",
+        ).pack(anchor="w", padx=6, pady=(6, 0))
+
+        mode_row = ttk.Frame(parent)
+        mode_row.pack(fill="x", padx=6, pady=6)
+        self.pf_mode_var = tk.StringVar(value="shortest_path")
+        ttk.Radiobutton(
+            mode_row, text="Shortest Path", variable=self.pf_mode_var,
+            value="shortest_path", command=self._refresh_pf_mode,
+        ).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(
+            mode_row, text="Reachable?", variable=self.pf_mode_var,
+            value="reachable", command=self._refresh_pf_mode,
+        ).pack(side="left")
+
+        # -- Shared Max Jump (ly): one field, used by both modes' graph-building --
+        jump_row = ttk.Frame(parent)
+        jump_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.pf_max_jump_ly_var = tk.StringVar(value=str(self.config.get("pf_max_jump_ly", 15.0)))
+        ttk.Label(jump_row, text="Max jump (ly):").pack(side="left")
+        ttk.Entry(jump_row, textvariable=self.pf_max_jump_ly_var, width=8).pack(side="left", padx=(6, 0))
+        self._pf_anchor_row = jump_row  # pack(after=...) anchor for the toggled mode frames
+
+        self.pf_origin_system_var = tk.StringVar(
+            value=self.config.get("pf_origin_system") or self.config.get("origin_system", "")
+        )
+        self.pf_target_system_var = tk.StringVar(value=self.config.get("pf_target_system", ""))
+
+        # -- Shortest Path frame --
+        self.pf_shortest_frame = ttk.LabelFrame(parent, text="Shortest Path")
+
+        sp_row1 = ttk.Frame(self.pf_shortest_frame)
+        sp_row1.pack(fill="x", padx=6, pady=6)
+        ttk.Label(sp_row1, text="Origin system:").pack(side="left")
+        self.pf_origin_combo = ttk.Combobox(sp_row1, textvariable=self.pf_origin_system_var, width=40)
+        self.pf_origin_combo.pack(side="left", padx=(6, 0), fill="x", expand=True)
+        self.pf_origin_combo.bind(
+            "<KeyRelease>",
+            lambda _e: self._schedule_system_search(self.pf_origin_combo, self.pf_origin_system_var, "_pf_origin_search_after_id"),
+        )
+
+        sp_row2 = ttk.Frame(self.pf_shortest_frame)
+        sp_row2.pack(fill="x", padx=6, pady=(0, 6))
+        ttk.Label(sp_row2, text="Target system:").pack(side="left")
+        self.pf_target_combo_sp = ttk.Combobox(sp_row2, textvariable=self.pf_target_system_var, width=40)
+        self.pf_target_combo_sp.pack(side="left", padx=(6, 0), fill="x", expand=True)
+        self.pf_target_combo_sp.bind(
+            "<KeyRelease>",
+            lambda _e: self._schedule_system_search(self.pf_target_combo_sp, self.pf_target_system_var, "_pf_target_search_after_id"),
+        )
+
+        self.find_path_button = ttk.Button(self.pf_shortest_frame, text="Find Path", command=self._on_find_path)
+        self.find_path_button.pack(anchor="w", padx=6, pady=6)
+
+        # -- Reachable? frame --
+        self.pf_reachable_frame = ttk.LabelFrame(parent, text="Reachable?")
+
+        rc_row1 = ttk.Frame(self.pf_reachable_frame)
+        rc_row1.pack(fill="x", padx=6, pady=6)
+        ttk.Label(rc_row1, text="Target system:").pack(side="left")
+        self.pf_target_combo_rc = ttk.Combobox(rc_row1, textvariable=self.pf_target_system_var, width=40)
+        self.pf_target_combo_rc.pack(side="left", padx=(6, 0), fill="x", expand=True)
+        self.pf_target_combo_rc.bind(
+            "<KeyRelease>",
+            lambda _e: self._schedule_system_search(self.pf_target_combo_rc, self.pf_target_system_var, "_pf_target_search_after_id"),
+        )
+
+        rc_row2 = ttk.Frame(self.pf_reachable_frame)
+        rc_row2.pack(fill="x", padx=6, pady=(0, 6))
+        self.pf_any_hops_var = tk.BooleanVar(value=bool(self.config.get("pf_any_hops", True)))
+        self.pf_max_hops_var = tk.StringVar(value=str(self.config.get("pf_max_hops", 20)))
+        ttk.Checkbutton(
+            rc_row2, text="Any number of hops", variable=self.pf_any_hops_var, command=self._refresh_pf_any_hops,
+        ).pack(side="left")
+        ttk.Label(rc_row2, text="Max hops:").pack(side="left", padx=(12, 0))
+        self.pf_max_hops_entry = ttk.Entry(rc_row2, textvariable=self.pf_max_hops_var, width=8)
+        self.pf_max_hops_entry.pack(side="left", padx=(6, 0))
+
+        rc_row3 = ttk.Frame(self.pf_reachable_frame)
+        rc_row3.pack(fill="x", padx=6, pady=(0, 6))
+        self.pf_candidate_count_var = tk.StringVar(value=str(self.config.get("pf_candidate_count", 10)))
+        ttk.Label(rc_row3, text="# of candidates to check:").pack(side="left")
+        ttk.Entry(rc_row3, textvariable=self.pf_candidate_count_var, width=8).pack(side="left", padx=(6, 0))
+
+        self.check_reachable_button = ttk.Button(
+            self.pf_reachable_frame, text="Check Reachability", command=self._on_check_reachable
+        )
+        self.check_reachable_button.pack(anchor="w", padx=6, pady=6)
+
+        self._refresh_pf_any_hops()
+
+        # -- Shared results area --
+        results_frame = ttk.LabelFrame(parent, text="Result")
+        results_frame.pack(fill="both", expand=True, padx=6, pady=6)
+        self.pf_summary_label = ttk.Label(results_frame, text="", wraplength=1000, justify="left")
+        self.pf_summary_label.pack(anchor="w", padx=6, pady=6)
+
+        ttk.Label(results_frame, text="Candidates Considered:").pack(anchor="w", padx=6)
+        self.pf_candidates_tree = treeview_utils.build_tree(results_frame, PF_CANDIDATES_COLUMNS)
+
+        ttk.Label(results_frame, text="Hop Path:").pack(anchor="w", padx=6, pady=(6, 0))
+        self.pf_path_tree = treeview_utils.build_tree(results_frame, PF_PATH_COLUMNS)
+
+        self._refresh_pf_mode()
+
+    def _refresh_pf_mode(self) -> None:
+        if self.pf_mode_var.get() == "reachable":
+            self.pf_shortest_frame.pack_forget()
+            if not self.pf_reachable_frame.winfo_ismapped():
+                self.pf_reachable_frame.pack(fill="x", padx=6, pady=6, after=self._pf_anchor_row)
+        else:
+            self.pf_reachable_frame.pack_forget()
+            if not self.pf_shortest_frame.winfo_ismapped():
+                self.pf_shortest_frame.pack(fill="x", padx=6, pady=6, after=self._pf_anchor_row)
+
+    def _refresh_pf_any_hops(self) -> None:
+        self.pf_max_hops_entry.configure(state=("disabled" if self.pf_any_hops_var.get() else "normal"))
+
+    def _collect_pf_config(self) -> dict[str, Any]:
+        def _float_or(value: str, default: float) -> float:
+            try:
+                return float(value)
+            except ValueError:
+                return default
+
+        def _int_or(value: str, default: int) -> int:
+            try:
+                return int(value)
+            except ValueError:
+                return default
+
+        self.config["db_paths"] = list(self.db_listbox.get(0, "end"))
+        self.config["pf_origin_system"] = self.pf_origin_system_var.get().strip()
+        self.config["pf_target_system"] = self.pf_target_system_var.get().strip()
+        self.config["pf_max_jump_ly"] = _float_or(self.pf_max_jump_ly_var.get(), 15.0)
+        self.config["pf_any_hops"] = bool(self.pf_any_hops_var.get())
+        self.config["pf_max_hops"] = _int_or(self.pf_max_hops_var.get(), 20)
+        self.config["pf_candidate_count"] = _int_or(self.pf_candidate_count_var.get(), 10)
+        self.config["out_dir"] = self.out_dir_var.get().strip()
+        return self.config
+
+    def _on_find_path(self) -> None:
+        if self.worker.is_running():
+            messagebox.showinfo(
+                "Job running", "Another job is already running. Wait for it to finish or cancel it first."
+            )
+            return
+        cfg = self._collect_pf_config()
+        db_paths = cfg["db_paths"]
+        if not db_paths:
+            messagebox.showwarning(
+                "No sector DBs selected", "Select at least one sector DB on the Run tab before searching."
+            )
+            return
+        missing = [p for p in db_paths if not Path(p).exists()]
+        if missing:
+            messagebox.showerror(
+                "Database(s) not found",
+                "The following sector DB(s) no longer exist:\n\n" + "\n".join(missing),
+            )
+            return
+        origin, target = cfg["pf_origin_system"], cfg["pf_target_system"]
+        if not origin or not target:
+            messagebox.showwarning("Origin and target required", "Enter both an origin system and a target system.")
+            return
+        if not db_lookup.system_exists(db_paths, origin):
+            messagebox.showerror("System not found", f"{origin!r} was not found in any selected DB.")
+            return
+        if not db_lookup.system_exists(db_paths, target):
+            messagebox.showerror("System not found", f"{target!r} was not found in any selected DB.")
+            return
+        if cfg["pf_max_jump_ly"] <= 0:
+            messagebox.showwarning("Invalid parameter", "Max jump (ly) must be greater than 0.")
+            return
+
+        out_dir = cfg["out_dir"] or "out"
+        cfg["out_dir"] = out_dir
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        config_module.save_config(cfg)
+
+        self._append_log(f"--- Finding shortest path: {origin!r} -> {target!r} ---")
+        self._pending_path_result = None
+        self._pending_path_mode = "shortest_path"
+        started = self.worker.start(pipeline.run_shortest_path_pipeline, cfg)
+        if not started:
+            return
+        self._set_controls_running(True)
+
+    def _on_check_reachable(self) -> None:
+        if self.worker.is_running():
+            messagebox.showinfo(
+                "Job running", "Another job is already running. Wait for it to finish or cancel it first."
+            )
+            return
+        cfg = self._collect_pf_config()
+        db_paths = cfg["db_paths"]
+        if not db_paths:
+            messagebox.showwarning(
+                "No sector DBs selected", "Select at least one sector DB on the Run tab before searching."
+            )
+            return
+        missing = [p for p in db_paths if not Path(p).exists()]
+        if missing:
+            messagebox.showerror(
+                "Database(s) not found",
+                "The following sector DB(s) no longer exist:\n\n" + "\n".join(missing),
+            )
+            return
+        target = cfg["pf_target_system"]
+        if not target:
+            messagebox.showwarning("Target system required", "Enter a target system.")
+            return
+        if not db_lookup.system_exists(db_paths, target):
+            messagebox.showerror("System not found", f"{target!r} was not found in any selected DB.")
+            return
+        if cfg["pf_max_jump_ly"] <= 0:
+            messagebox.showwarning("Invalid parameter", "Max jump (ly) must be greater than 0.")
+            return
+        if not cfg["pf_any_hops"] and cfg["pf_max_hops"] <= 0:
+            messagebox.showwarning(
+                "Invalid parameter", "Max hops must be greater than 0 (or check 'Any number of hops')."
+            )
+            return
+        if cfg["pf_candidate_count"] <= 0:
+            messagebox.showwarning("Invalid parameter", "# of candidates to check must be greater than 0.")
+            return
+
+        out_dir = cfg["out_dir"] or "out"
+        cfg["out_dir"] = out_dir
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        config_module.save_config(cfg)
+
+        self._append_log(f"--- Checking reachability of {target!r} ---")
+        self._pending_path_result = None
+        self._pending_path_mode = "reachable"
+        started = self.worker.start(pipeline.run_check_reachable_pipeline, cfg)
+        if not started:
+            return
+        self._set_controls_running(True)
+
+    def _format_max_hops(self, max_hops: Optional[int]) -> str:
+        return "unlimited" if max_hops is None else str(max_hops)
+
+    def _format_path_rows(self, path_rows: list[dict]) -> list[dict]:
+        return [{**row, "occupied": "Yes" if row["occupied"] else "No"} for row in path_rows]
+
+    def _format_candidate_rows(self, candidates: list[dict]) -> list[dict]:
+        return [
+            {
+                **c,
+                "hop_count": c["hop_count"] if c["hop_count"] is not None else "unreachable",
+                "within_cap": "Yes" if c["within_cap"] else "No",
+            }
+            for c in candidates
+        ]
+
+    def _load_path_result(self, result: dict, mode: Optional[str]) -> None:
+        self.pf_path_tree.delete(*self.pf_path_tree.get_children())
+        self.pf_candidates_tree.delete(*self.pf_candidates_tree.get_children())
+
+        if mode == "shortest_path":
+            if result.get("reachable"):
+                summary = f"{result['origin']} -> {result['target']}: reachable in {result['hop_count']} hop(s)."
+                treeview_utils.load_dicts_into_tree(self.pf_path_tree, self._format_path_rows(result["path"]))
+            else:
+                summary = f"{result['origin']} -> {result['target']}: NOT reachable in the loaded data."
+            self.pf_summary_label.configure(text=summary)
+
+        elif mode == "reachable":
+            candidates = result.get("candidates") or []
+            treeview_utils.load_dicts_into_tree(self.pf_candidates_tree, self._format_candidate_rows(candidates))
+
+            if not candidates:
+                summary = f"No occupied systems exist anywhere in the loaded data to check against {result['target']}."
+            elif result.get("reachable") and result.get("best_candidate"):
+                best = result["best_candidate"]
+                summary = (
+                    f"{best['system_name']} can reach {result['target']} in {best['hop_count']} hop(s) "
+                    f"(within the {self._format_max_hops(result['max_hops'])}-hop cap)."
+                )
+                treeview_utils.load_dicts_into_tree(self.pf_path_tree, self._format_path_rows(result["path"]))
+            elif result.get("closest_miss"):
+                miss = result["closest_miss"]
+                excess = miss.get("excess_hops")
+                excess_text = f" ({excess} over the cap)" if excess is not None else ""
+                summary = (
+                    f"No checked candidate reaches {result['target']} within the "
+                    f"{self._format_max_hops(result['max_hops'])}-hop cap. Closest miss: "
+                    f"{miss['system_name']} at {miss['hop_count']} hop(s){excess_text}."
+                )
+            else:
+                summary = f"None of the checked candidates are even connected to {result['target']} in the loaded data."
+            self.pf_summary_label.configure(text=summary)
+
+        self.notebook.select(self.path_finder_tab)
 
     # ------------------------------------------------------------------
     # Settings tab
@@ -515,6 +847,8 @@ class App:
         state = "disabled" if running else "normal"
         self.run_button.configure(state=state)
         self.extract_button.configure(state=state)
+        self.find_path_button.configure(state=state)
+        self.check_reachable_button.configure(state=state)
         self.cancel_button.configure(state=("normal" if running else "disabled"))
         if running:
             self.status_label.configure(text="Running...")
@@ -541,6 +875,11 @@ class App:
         if returncode == "0" and self._pending_extracted_db_paths is not None:
             self._offer_extracted_dbs(self._pending_extracted_db_paths)
         self._pending_extracted_db_paths = None
+
+        if returncode == "0" and self._pending_path_result is not None:
+            self._load_path_result(self._pending_path_result, self._pending_path_mode)
+        self._pending_path_result = None
+        self._pending_path_mode = None
 
     def _offer_extracted_dbs(self, db_paths: list[str]) -> None:
         """Auto-adds the newly extracted DBs to the Run tab's DB listbox
@@ -583,6 +922,9 @@ class App:
                 elif line.startswith(pipeline.EXTRACT_RESULT_SENTINEL + ":"):
                     payload = line.split(":", 1)[1]
                     self._pending_extracted_db_paths = payload.split(pipeline.EXTRACT_RESULT_SEP)
+                elif line.startswith(pipeline.PATH_RESULT_SENTINEL + ":"):
+                    payload = line.split(":", 1)[1]
+                    self._pending_path_result = json.loads(payload)
                 else:
                     self._append_log(line)
         except queue.Empty:
@@ -602,6 +944,8 @@ class App:
         self.worker.cancel()
         self.run_button.configure(state="disabled")
         self.extract_button.configure(state="disabled")
+        self.find_path_button.configure(state="disabled")
+        self.check_reachable_button.configure(state="disabled")
         self.cancel_button.configure(state="disabled")
         self.status_label.configure(text="Cancelling -- please wait before closing...")
         self._wait_for_shutdown(0)
