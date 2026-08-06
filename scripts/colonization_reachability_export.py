@@ -11,28 +11,46 @@ ranks that reachable set for colonization value across four factors:
 Earth-like Worlds, Water Worlds, Terraformable High Metal Content Worlds,
 and high-density Metallic/Icy rings.
 
+Multiple --db paths may be given (repeat the flag). Their systems are
+merged into one reachability graph before the BFS runs, since routing
+through an adjacent sector's systems can shorten a hop chain or make an
+otherwise-unreachable candidate reachable. system_key is globally unique
+(keyed on Elite Dangerous's own SystemAddress -- see
+extract_sector_systems_to_sqlite.system_key_for), so merging is safe: a
+system_key seen again from a later DB is a true cross-DB duplicate and is
+skipped, keeping the earlier DB's copy.
+
 Systems already claimed by a faction (systems.raw_json `government` field
 set to anything other than absent/"None") are kept in the reachability
 graph as hop-through waypoints but excluded from both output rankings,
 since an occupied system is not a valid colonization target.
 
+The point values driving colonization_score (tier sizes and per-body/ring
+points) are configurable via the ScoringRubric dataclass -- see
+gui/rubric.py for the GUI's editor. RING_DENSITY_FLOOR, the ring
+ratio-bonus curve slope, and GALACTIC_MEDIANS stay fixed constants, not
+part of the rubric (see ScoringRubric's docstring for why).
+
 Writes two CSVs into --out-dir:
-  1. `<sector>_<origin>_colonization_candidates.csv` -- every reachable
-     system, ranked by colonization_score, including total_body_count
-     (Star + Planet, matching Spansh's own bodyCount semantics).
+  1. `<sector>_<origin>_colonization_candidates.csv` -- every reachable,
+     colonization-eligible system, ranked by colonization_score, including
+     total_body_count (Star + Planet, matching Spansh's own bodyCount
+     semantics) and every individual sub-score plus a key_scoring_factors
+     summary column.
   2. `<sector>_<origin>_densest_systems.csv` -- the --dense-top-n (default
      20) reachable systems with the most planetary bodies, with primary
      stellar type, additional star count, a planetary-type breakdown, and
      every individual Metallic/Icy ring's MOI (surface density, kg/m^2) and
      % delta vs the galactic median for its class.
 
-Entirely offline -- everything needed lives in the extracted sector DB
+Entirely offline -- everything needed lives in the extracted sector DB(s)
 (no EDSM/Spansh calls).
 
 Usage:
     python scripts/colonization_reachability_export.py \\
         --db data/sector_library/sector_eafots.sqlite \\
-        --sector "Eafots" \\
+        --db data/sector_library/sector_Parrots_Head_Sector.sqlite \\
+        --sector "Eafots + Parrots Head Sector" \\
         --origin-system "Eafots VB-W b15-1" \\
         --max-jump-ly 15 --max-hops 15 \\
         --out-dir out
@@ -47,8 +65,9 @@ import math
 import sqlite3
 import sys
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 try:
     from scripts.extract_sector_systems_to_sqlite import sanitize_prefix
@@ -63,13 +82,9 @@ GALACTIC_MEDIANS: dict[str, float] = {
     "Metallic": 9.251326e-06,
 }
 
-RING_BASE_POINTS: dict[str, float] = {
-    "Metallic": 30.0,
-    "Icy":      25.0,
-}
-
 # A ring only counts as "high-density" at or above this multiple of the
-# galactic median surface density for its class.
+# galactic median surface density for its class. Fixed -- tied to how the
+# median itself is computed, not a scoring preference.
 RING_DENSITY_FLOOR = 1.0
 
 SUBTYPE_ELW = "Earth-like world"
@@ -78,12 +93,39 @@ SUBTYPE_HMC = "High metal content world"
 TERRAFORM_YES = "Terraformable"
 
 
+# ── Scoring rubric ───────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ScoringRubric:
+    """User-editable colonization-scoring rubric (Run tab's "Customize
+    Scoring..." dialog in the GUI; CLI usage always uses STOCK_RUBRIC).
+    RING_DENSITY_FLOOR, the 0.5 ratio-bonus slope in score_ring(), and
+    GALACTIC_MEDIANS stay fixed module-level constants -- they're tied to
+    how the galactic median itself is computed, not a preference."""
+    elw_first_n: int = 2
+    elw_first_pts: float = 100.0
+    elw_rest_pts: float = 50.0
+    ww_first_n: int = 2
+    ww_first_pts: float = 40.0
+    ww_rest_pts: float = 20.0
+    hmct_first_n: int = 3
+    hmct_first_pts: float = 30.0
+    hmct_rest_pts: float = 15.0
+    ring_metallic_base_pts: float = 30.0
+    ring_icy_base_pts: float = 25.0
+
+
+STOCK_RUBRIC = ScoringRubric()
+
+
 def is_colonization_eligible(raw_json: Optional[str]) -> bool:
     """A system is only open for colonization if it has no established
     government -- i.e. systems.raw_json's `government` field is absent or
     the literal string "None". Anything else (Democracy, Feudal,
     Dictatorship, Cooperative, ...) means the system is already
-    inhabited/claimed by a faction and is not a valid colonization target."""
+    inhabited/claimed by a faction and is not a valid colonization target.
+    This rule is fixed and not part of ScoringRubric -- it's a game-mechanic
+    fact, not a scoring preference."""
     if not raw_json:
         return True
     try:
@@ -110,9 +152,25 @@ def ring_density(mass: float, inner_m: float, outer_m: float) -> float:
     return mass / area if area > 0 else 0.0
 
 
-def score_ring(ratio: float, ring_class: str) -> float:
-    base = RING_BASE_POINTS[ring_class]
+def score_ring(ratio: float, ring_class: str, rubric: ScoringRubric) -> float:
+    base = rubric.ring_metallic_base_pts if ring_class == "Metallic" else rubric.ring_icy_base_pts
     return base * (1.0 + (ratio - 1.0) * 0.5)
+
+
+KEY_FACTOR_ORDER = ["elw_score", "ww_score", "hmct_score", "metallic_ring_score", "icy_ring_score"]
+KEY_FACTOR_ABBREV = {
+    "elw_score": "ELW", "ww_score": "WW", "hmct_score": "HMC-T",
+    "metallic_ring_score": "Metallic", "icy_ring_score": "Icy",
+}
+
+
+def build_key_scoring_factors(scores: dict[str, float]) -> str:
+    """All nonzero-contributing categories, abbreviated, ordered by point
+    contribution descending (ties broken by KEY_FACTOR_ORDER for
+    determinism). Empty string if the system scored zero everywhere."""
+    nonzero = [(k, scores.get(k) or 0.0) for k in KEY_FACTOR_ORDER if (scores.get(k) or 0.0) > 0]
+    nonzero.sort(key=lambda kv: -kv[1])
+    return "+".join(KEY_FACTOR_ABBREV[k] for k, _ in nonzero)
 
 
 # ── Reachability graph ───────────────────────────────────────────────────
@@ -187,13 +245,75 @@ def distance_3d(a: tuple[float, float, float], b: tuple[float, float, float]) ->
     return math.sqrt(sum((p - q) ** 2 for p, q in zip(a, b)))
 
 
+# ── Multi-DB system loading ──────────────────────────────────────────────
+
+class MergedSystems(NamedTuple):
+    keys: list[str]
+    names: list[str]
+    coords: list[tuple[float, float, float]]
+    eligible: list[bool]
+    key_to_db_idx: dict[str, int]   # system_key -> index into db_paths
+
+
+def load_merged_systems(db_paths: list[Path]) -> MergedSystems:
+    """Loads systems.(system_key,name,x,y,z,raw_json) from every db_path and
+    concatenates into one global list, tagging each system_key with which
+    db_paths index it came from. system_key is globally unique (keyed on
+    ED's own SystemAddress -- see extract_sector_systems_to_sqlite's
+    system_key_for), so a key seen again from a later DB is a true cross-DB
+    duplicate (rare -- sector-prefix matching in extract_multi_sector_to_
+    sqlite.py is mutually exclusive) and is skipped defensively, keeping
+    the earlier DB's copy (db_paths order == precedence order)."""
+    keys: list[str] = []
+    names: list[str] = []
+    coords: list[tuple[float, float, float]] = []
+    eligible: list[bool] = []
+    key_to_db_idx: dict[str, int] = {}
+    seen: set[str] = set()
+
+    for db_idx, db_path in enumerate(db_paths):
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT system_key, name, x, y, z, raw_json FROM systems WHERE x IS NOT NULL"
+            ).fetchall()
+        finally:
+            conn.close()
+        dup_count = 0
+        for key, name, x, y, z, raw_json in rows:
+            if key in seen:
+                dup_count += 1
+                continue
+            seen.add(key)
+            keys.append(key)
+            names.append(name)
+            coords.append((x, y, z))
+            eligible.append(is_colonization_eligible(raw_json))
+            key_to_db_idx[key] = db_idx
+        print(
+            f"  {db_path.name}: {len(rows):,} systems"
+            + (f" ({dup_count} skipped as cross-DB duplicates)" if dup_count else "")
+        )
+
+    return MergedSystems(keys, names, coords, eligible, key_to_db_idx)
+
+
+def _partition_by_db(keys: list[str], key_to_db_idx: dict[str, int]) -> dict[int, list[str]]:
+    by_db: dict[int, list[str]] = defaultdict(list)
+    for k in keys:
+        by_db[key_to_db_idx[k]].append(k)
+    return by_db
+
+
 # ── Data extraction for the reachable set ───────────────────────────────
 
 def score_systems(
     conn: sqlite3.Connection,
     reachable_keys: list[str],
 ) -> dict[str, dict]:
-    """Body/ring aggregation + scoring, scoped to just the reachable systems."""
+    """Body/ring aggregation, scoped to just the reachable systems from ONE
+    DB connection. Returns raw counts/ratios only -- point scoring (which
+    depends on the active ScoringRubric) happens later in run()."""
     placeholders = ",".join("?" for _ in reachable_keys)
     results: dict[str, dict] = {
         k: {
@@ -252,6 +372,24 @@ def score_systems(
             r[key] = ratio
 
     return results
+
+
+def score_systems_multi(
+    db_paths: list[Path],
+    reachable_keys: list[str],
+    key_to_db_idx: dict[str, int],
+) -> dict[str, dict]:
+    """Partitions reachable_keys by source DB and calls the unchanged
+    score_systems() once per DB, merging results (collision-free -- keys
+    are globally unique)."""
+    merged: dict[str, dict] = {}
+    for db_idx, sub_keys in _partition_by_db(reachable_keys, key_to_db_idx).items():
+        conn = sqlite3.connect(str(db_paths[db_idx]))
+        try:
+            merged.update(score_systems(conn, sub_keys))
+        finally:
+            conn.close()
+    return merged
 
 
 def extract_dense_system_details(
@@ -367,6 +505,21 @@ def extract_dense_system_details(
     return resolved
 
 
+def extract_dense_system_details_multi(
+    db_paths: list[Path],
+    reachable_keys: list[str],
+    key_to_db_idx: dict[str, int],
+) -> dict[str, dict]:
+    merged: dict[str, dict] = {}
+    for db_idx, sub_keys in _partition_by_db(reachable_keys, key_to_db_idx).items():
+        conn = sqlite3.connect(str(db_paths[db_idx]))
+        try:
+            merged.update(extract_dense_system_details(conn, sub_keys))
+        finally:
+            conn.close()
+    return merged
+
+
 def write_dense_systems_csv(
     out_path: Path,
     reachable_idxs: list[int],
@@ -424,39 +577,35 @@ def write_dense_systems_csv(
 # ── Main pipeline ────────────────────────────────────────────────────────
 
 def run(
-    db_path: Path,
+    db_paths: list[Path],
     origin_system: str,
     max_jump_ly: float,
     max_hops: int,
     out_dir: Path,
     sector_label: str,
     dense_top_n: int = 20,
+    rubric: ScoringRubric = STOCK_RUBRIC,
 ) -> tuple[Path, Path]:
     print("Colonization Reachability Export")
-    print(f"  Source DB:     {db_path}")
+    print(f"  Source DB(s):  {', '.join(str(p) for p in db_paths)}")
     print(f"  Origin system: {origin_system}")
     print(f"  Max jump:      {max_jump_ly} ly/hop")
     print(f"  Max hops:      {max_hops}")
     print()
 
-    conn = sqlite3.connect(str(db_path))
-
     print("Loading systems...")
-    rows = conn.execute(
-        "SELECT system_key, name, x, y, z, raw_json FROM systems WHERE x IS NOT NULL"
-    ).fetchall()
-    keys     = [r[0] for r in rows]
-    names    = [r[1] for r in rows]
-    coords   = [(r[2], r[3], r[4]) for r in rows]
-    eligible = [is_colonization_eligible(r[5]) for r in rows]
-    n = len(rows)
-    print(f"  {n:,} systems loaded.")
+    keys, names, coords, eligible, key_to_db_idx = load_merged_systems(db_paths)
+    n = len(keys)
+    print(f"  {n:,} systems loaded total.")
 
-    name_to_idx = {name: i for i, name in enumerate(names)}
+    # First-occurrence-wins (a plain dict comprehension would give
+    # *last*-wins, disagreeing with load_merged_systems' dedup precedence).
+    name_to_idx: dict[str, int] = {}
+    for i, name in enumerate(names):
+        name_to_idx.setdefault(name, i)
     origin_idx = name_to_idx.get(origin_system)
     if origin_idx is None:
-        conn.close()
-        raise ValueError(f"Origin system {origin_system!r} not found in {db_path}")
+        raise ValueError(f"Origin system {origin_system!r} not found in any selected DB")
 
     print("Building spatial adjacency graph...")
     adjacency = build_adjacency(coords, max_jump_ly)
@@ -480,11 +629,10 @@ def run(
           f"(ungoverned); {excluded_count:,} excluded as already inhabited/claimed.")
 
     print("Scoring reachable systems (bodies + rings)...")
-    scored = score_systems(conn, reachable_keys)
+    scored = score_systems_multi(db_paths, reachable_keys, key_to_db_idx)
 
     print("Extracting stellar/planetary composition for densest-systems report...")
-    dense_details = extract_dense_system_details(conn, reachable_keys)
-    conn.close()
+    dense_details = extract_dense_system_details_multi(db_paths, reachable_keys, key_to_db_idx)
 
     origin_coords = coords[origin_idx]
     out_rows = []
@@ -494,15 +642,20 @@ def run(
         x, y, z = coords[i]
         s = scored[key]
 
-        elw_score  = score_tiered(s["elw_count"], 2, 100.0, 50.0)
-        ww_score   = score_tiered(s["ww_count"], 2, 40.0, 20.0)
-        hmct_score = score_tiered(s["hmct_count"], 3, 30.0, 15.0)
+        elw_score  = score_tiered(s["elw_count"], rubric.elw_first_n, rubric.elw_first_pts, rubric.elw_rest_pts)
+        ww_score   = score_tiered(s["ww_count"], rubric.ww_first_n, rubric.ww_first_pts, rubric.ww_rest_pts)
+        hmct_score = score_tiered(s["hmct_count"], rubric.hmct_first_n, rubric.hmct_first_pts, rubric.hmct_rest_pts)
 
-        metallic_score = score_ring(s["metallic_ratio"], "Metallic") if s["metallic_ratio"] > 0 else 0.0
-        icy_score      = score_ring(s["icy_ratio"], "Icy") if s["icy_ratio"] > 0 else 0.0
+        metallic_score = score_ring(s["metallic_ratio"], "Metallic", rubric) if s["metallic_ratio"] > 0 else 0.0
+        icy_score      = score_ring(s["icy_ratio"], "Icy", rubric) if s["icy_ratio"] > 0 else 0.0
         ring_score = metallic_score + icy_score
 
         total = elw_score + ww_score + hmct_score + ring_score
+
+        key_scoring_factors = build_key_scoring_factors({
+            "elw_score": elw_score, "ww_score": ww_score, "hmct_score": hmct_score,
+            "metallic_ring_score": metallic_score, "icy_ring_score": icy_score,
+        })
 
         out_rows.append({
             "system_name": name,
@@ -522,6 +675,7 @@ def run(
             "icy_ring_score": round(icy_score, 1) if icy_score > 0 else "",
             "ring_score": round(ring_score, 1),
             "colonization_score": round(total, 1),
+            "key_scoring_factors": key_scoring_factors,
         })
 
     out_rows.sort(key=lambda r: (-r["colonization_score"], r["system_name"]))
@@ -539,7 +693,7 @@ def run(
         "elw_score", "ww_score", "hmct_score",
         "metallic_ring_ratio", "metallic_ring_score",
         "icy_ring_ratio", "icy_ring_score", "ring_score",
-        "colonization_score",
+        "colonization_score", "key_scoring_factors",
     ]
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -576,9 +730,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Rank colonization candidates within a jump-chain network of an origin system."
     )
-    parser.add_argument("--db", type=Path, required=True, help="Path to sector library SQLite file")
+    parser.add_argument(
+        "--db", dest="db_paths", action="append", type=Path, required=True,
+        help="Path to a sector library SQLite file; repeat --db to merge multiple sectors' reachability graphs",
+    )
     parser.add_argument("--sector", required=True, help="Sector name (for labeling/output filename)")
-    parser.add_argument("--origin-system", required=True, help="Origin system name (must exist in the DB)")
+    parser.add_argument("--origin-system", required=True, help="Origin system name (must exist in one of the DBs)")
     parser.add_argument("--max-jump-ly", type=float, default=15.0, help="Max ly per hop (default: 15)")
     parser.add_argument("--max-hops", type=int, default=15, help="Max chain length in hops (default: 15)")
     parser.add_argument("--dense-top-n", type=int, default=20,
@@ -586,19 +743,21 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=Path("out"), help="Output directory (default: out)")
     args = parser.parse_args()
 
-    if not args.db.exists():
-        print(f"ERROR: DB not found: {args.db}", file=sys.stderr)
+    missing = [p for p in args.db_paths if not p.exists()]
+    if missing:
+        print(f"ERROR: DB(s) not found: {', '.join(str(p) for p in missing)}", file=sys.stderr)
         return 1
 
     try:
         run(
-            db_path=args.db,
+            db_paths=args.db_paths,
             origin_system=args.origin_system,
             max_jump_ly=args.max_jump_ly,
             max_hops=args.max_hops,
             out_dir=args.out_dir,
             sector_label=args.sector,
             dense_top_n=args.dense_top_n,
+            rubric=STOCK_RUBRIC,
         )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

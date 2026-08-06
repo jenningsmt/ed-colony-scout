@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from gui import config as config_module
 from gui import db_lookup, pipeline, treeview_utils
+from gui import rubric as rubric_module
 from gui.treeview_utils import ColumnSpec
 from gui.worker import DONE_SENTINEL, Worker
 
@@ -21,25 +22,20 @@ SEARCH_DEBOUNCE_MS = 200
 
 CANDIDATES_COLUMNS = [
     ColumnSpec("rank", "Rank", 50, True, "e"),
+    ColumnSpec("colonization_score", "Score", 80, True, "e"),
     ColumnSpec("system_name", "System", 220, False, "w"),
-    ColumnSpec("x", "X", 70, True, "e"),
-    ColumnSpec("y", "Y", 70, True, "e"),
-    ColumnSpec("z", "Z", 70, True, "e"),
-    ColumnSpec("distance_ly", "Dist (ly)", 80, True, "e"),
+    ColumnSpec("key_scoring_factors", "Key Scoring Factors", 170, False, "w"),
     ColumnSpec("hop_count", "Hops", 55, True, "e"),
+    ColumnSpec("distance_ly", "Dist (ly)", 80, True, "e"),
     ColumnSpec("total_body_count", "Bodies", 60, True, "e"),
     ColumnSpec("elw_count", "ELW", 50, True, "e"),
     ColumnSpec("ww_count", "WW", 50, True, "e"),
     ColumnSpec("hmct_terraformable_count", "HMC-T", 60, True, "e"),
-    ColumnSpec("elw_score", "ELW Score", 80, True, "e"),
-    ColumnSpec("ww_score", "WW Score", 80, True, "e"),
-    ColumnSpec("hmct_score", "HMC-T Score", 90, True, "e"),
     ColumnSpec("metallic_ring_ratio", "Metallic Ratio", 100, True, "e"),
-    ColumnSpec("metallic_ring_score", "Metallic Score", 100, True, "e"),
     ColumnSpec("icy_ring_ratio", "Icy Ratio", 80, True, "e"),
-    ColumnSpec("icy_ring_score", "Icy Score", 80, True, "e"),
-    ColumnSpec("ring_score", "Ring Score", 85, True, "e"),
-    ColumnSpec("colonization_score", "Score", 80, True, "e"),
+    ColumnSpec("x", "X", 70, True, "e"),
+    ColumnSpec("y", "Y", 70, True, "e"),
+    ColumnSpec("z", "Z", 70, True, "e"),
 ]
 
 DENSEST_COLUMNS = [
@@ -55,31 +51,55 @@ DENSEST_COLUMNS = [
     ColumnSpec("metallic_icy_rings", "Metallic/Icy Rings", 350, False, "w"),
 ]
 
+ORIGIN_HELP_TEXT = (
+    "Origin System defines the starting point of the reachability search.\n\n"
+    "This app finds every system reachable via a CHAIN of jumps, where each "
+    "hop must land within Max Jump (ly) of the PREVIOUS system in the chain "
+    "-- not a straight-line radius around the origin. This mirrors how "
+    "colonization bridging actually works in-game: a chain of short hops "
+    "can reach much farther than a single long jump.\n\n"
+    "The origin is normally your own existing colony (or the system you "
+    "plan to colonize from). Results are every system reachable within Max "
+    "Hops jumps of it, ranked by colonization_score."
+)
+
 
 class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(f"ED Colony Scout {config_module.APP_VERSION}")
-        self.root.geometry("1100x750")
+        self.root.geometry("1100x820")
 
         self.worker = Worker()
         self.config: dict[str, Any] = config_module.load_config()
         self._pending_result_paths: Optional[tuple[Path, Path]] = None
+        self._pending_extracted_db_paths: Optional[list[str]] = None
         self._search_after_id: Optional[str] = None
-        self._last_auto_sector_label = ""
+        # self._last_auto_sector_label is set in _build_run_tab, once the
+        # persisted db_paths are known (see the comment there for why).
+
+        # Shared status/log panel first -- Tk `pack` allocates from the
+        # outside in, so the bottom panel must claim its edge before the
+        # Notebook's expand=True consumes all remaining space.
+        self.shared_panel = ttk.Frame(root)
+        self._build_shared_status_panel(self.shared_panel)
+        self.shared_panel.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
 
         self.notebook = ttk.Notebook(root)
-        self.notebook.pack(fill="both", expand=True, padx=8, pady=8)
+        self.notebook.pack(side="top", fill="both", expand=True, padx=8, pady=8)
 
+        self.prep_tab = ttk.Frame(self.notebook)
         self.run_tab = ttk.Frame(self.notebook)
         self.candidates_tab = ttk.Frame(self.notebook)
         self.dense_tab = ttk.Frame(self.notebook)
         self.settings_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.prep_tab, text="Prep Sectors")
         self.notebook.add(self.run_tab, text="Run")
         self.notebook.add(self.candidates_tab, text="Candidates")
         self.notebook.add(self.dense_tab, text="Densest Systems")
         self.notebook.add(self.settings_tab, text="Settings")
 
+        self._build_prep_tab(self.prep_tab)
         self._build_run_tab(self.run_tab)
         self.candidates_tree = treeview_utils.build_tree(self.candidates_tab, CANDIDATES_COLUMNS)
         self.dense_tree = treeview_utils.build_tree(self.dense_tab, DENSEST_COLUMNS)
@@ -89,30 +109,185 @@ class App:
         self.root.after(POLL_INTERVAL_MS, self._poll_log_queue)
 
     # ------------------------------------------------------------------
+    # Shared status/log panel
+    # ------------------------------------------------------------------
+    def _build_shared_status_panel(self, parent: ttk.Frame) -> None:
+        controls = ttk.Frame(parent)
+        controls.pack(fill="x", padx=6, pady=(6, 0))
+        self.cancel_button = ttk.Button(controls, text="Cancel", command=self._on_cancel, state="disabled")
+        self.cancel_button.pack(side="left")
+        self.status_label = ttk.Label(controls, text="Idle")
+        self.status_label.pack(side="left", padx=12)
+
+        log_frame = ttk.LabelFrame(parent, text="Log")
+        log_frame.pack(fill="both", expand=True, padx=6, pady=6)
+        self.log_text = tk.Text(log_frame, height=10, state="disabled", wrap="word")
+        log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        log_scroll.pack(side="right", fill="y")
+
+    # ------------------------------------------------------------------
+    # Prep Sectors tab
+    # ------------------------------------------------------------------
+    def _build_prep_tab(self, parent: ttk.Frame) -> None:
+        loc_frame = ttk.LabelFrame(parent, text="Data Locations")
+        loc_frame.pack(fill="x", padx=6, pady=6)
+
+        self.galaxy_dump_path_var = tk.StringVar(value=self.config.get("galaxy_dump_path", ""))
+        self.sector_library_dir_var = tk.StringVar(value=self.config.get("sector_library_dir", ""))
+
+        grid = ttk.Frame(loc_frame)
+        grid.pack(fill="x", padx=6, pady=6)
+        ttk.Label(grid, text="Galaxy dump path:").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(grid, textvariable=self.galaxy_dump_path_var, width=55).grid(row=0, column=1, sticky="we", pady=4)
+        ttk.Button(grid, text="Browse...", command=self._browse_galaxy_dump).grid(row=0, column=2, padx=(6, 0))
+        ttk.Label(grid, text="Sector library directory:").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(grid, textvariable=self.sector_library_dir_var, width=55).grid(row=1, column=1, sticky="we", pady=4)
+        ttk.Button(grid, text="Browse...", command=self._browse_sector_library_dir).grid(row=1, column=2, padx=(6, 0))
+        grid.columnconfigure(1, weight=1)
+
+        sector_frame = ttk.LabelFrame(parent, text="Sector Name Prefixes")
+        sector_frame.pack(fill="x", padx=6, pady=6)
+        list_row = ttk.Frame(sector_frame)
+        list_row.pack(fill="x", padx=6, pady=6)
+        self.sector_prefix_listbox = tk.Listbox(list_row, height=6, selectmode="extended")
+        self.sector_prefix_listbox.pack(side="left", fill="both", expand=True)
+        for prefix in self.config.get("sector_prefixes", []):
+            self.sector_prefix_listbox.insert("end", prefix)
+
+        list_buttons = ttk.Frame(list_row)
+        list_buttons.pack(side="left", padx=6)
+        ttk.Button(list_buttons, text="Remove selected", command=self._remove_selected_sector_prefixes).pack(
+            fill="x", pady=2
+        )
+        ttk.Button(list_buttons, text="Clear all", command=self._clear_sector_prefixes).pack(fill="x", pady=2)
+
+        entry_row = ttk.Frame(sector_frame)
+        entry_row.pack(fill="x", padx=6, pady=(0, 6))
+        self.sector_prefix_entry = ttk.Entry(entry_row)
+        self.sector_prefix_entry.pack(side="left", fill="x", expand=True)
+        self.sector_prefix_entry.bind("<Return>", lambda _e: self._add_sector_prefix())
+        ttk.Button(entry_row, text="Add", command=self._add_sector_prefix).pack(side="left", padx=(6, 0))
+
+        controls = ttk.Frame(parent)
+        controls.pack(fill="x", padx=6, pady=6)
+        self.extract_button = ttk.Button(controls, text="Extract", command=self._on_extract)
+        self.extract_button.pack(side="left")
+
+    def _browse_galaxy_dump(self) -> None:
+        chosen = filedialog.askopenfilename(
+            initialdir=str(Path(self.galaxy_dump_path_var.get() or ".").parent),
+            filetypes=[("Galaxy dump", "*.json.gz *.json"), ("All files", "*.*")],
+        )
+        if chosen:
+            self.galaxy_dump_path_var.set(chosen)
+
+    def _browse_sector_library_dir(self) -> None:
+        chosen = filedialog.askdirectory(initialdir=self.sector_library_dir_var.get() or ".")
+        if chosen:
+            self.sector_library_dir_var.set(chosen)
+
+    def _add_sector_prefix(self) -> None:
+        value = self.sector_prefix_entry.get().strip()
+        if not value:
+            return
+        existing = self.sector_prefix_listbox.get(0, "end")
+        if value not in existing:
+            self.sector_prefix_listbox.insert("end", value)
+        self.sector_prefix_entry.delete(0, "end")
+
+    def _remove_selected_sector_prefixes(self) -> None:
+        for index in reversed(self.sector_prefix_listbox.curselection()):
+            self.sector_prefix_listbox.delete(index)
+
+    def _clear_sector_prefixes(self) -> None:
+        self.sector_prefix_listbox.delete(0, "end")
+
+    def _on_extract(self) -> None:
+        if self.worker.is_running():
+            messagebox.showinfo(
+                "Job running", "Another job is already running. Wait for it to finish or cancel it first."
+            )
+            return
+        prefixes = list(self.sector_prefix_listbox.get(0, "end"))
+        galaxy_dump_path = self.galaxy_dump_path_var.get().strip()
+        sector_library_dir = self.sector_library_dir_var.get().strip()
+
+        if not galaxy_dump_path or not Path(galaxy_dump_path).exists():
+            messagebox.showerror(
+                "Galaxy dump not found",
+                f"No galaxy dump file found at:\n\n{galaxy_dump_path or '(not set)'}",
+            )
+            return
+        if not prefixes:
+            messagebox.showwarning("No sector prefixes", "Add at least one sector prefix before extracting.")
+            return
+        if not sector_library_dir:
+            messagebox.showwarning(
+                "Sector library directory required", "Set a sector library directory before extracting."
+            )
+            return
+        Path(sector_library_dir).mkdir(parents=True, exist_ok=True)
+
+        self.config["galaxy_dump_path"] = galaxy_dump_path
+        self.config["sector_prefixes"] = prefixes
+        self.config["sector_library_dir"] = sector_library_dir
+        config_module.save_config(self.config)
+
+        self._append_log(f"--- Starting extraction: {', '.join(prefixes)} ---")
+        self._pending_extracted_db_paths = None
+        started = self.worker.start(pipeline.run_sector_extraction_pipeline, self.config)
+        if not started:
+            return
+        self._set_controls_running(True)
+
+    # ------------------------------------------------------------------
     # Run tab
     # ------------------------------------------------------------------
     def _build_run_tab(self, parent: ttk.Frame) -> None:
-        # -- Sector Database --
-        db_frame = ttk.LabelFrame(parent, text="Sector Database")
+        # -- Sector Database(s) --
+        db_frame = ttk.LabelFrame(parent, text="Sector Database(s)")
         db_frame.pack(fill="x", padx=6, pady=6)
 
-        self.db_path_var = tk.StringVar(value=self.config.get("db_path", ""))
         self.sector_label_var = tk.StringVar(value=self.config.get("sector_label", ""))
 
-        db_row = ttk.Frame(db_frame)
-        db_row.pack(fill="x", padx=6, pady=4)
-        ttk.Label(db_row, text="DB file:").pack(side="left")
-        ttk.Entry(db_row, textvariable=self.db_path_var, width=60).pack(
-            side="left", fill="x", expand=True, padx=(6, 6)
+        list_row = ttk.Frame(db_frame)
+        list_row.pack(fill="x", padx=6, pady=6)
+        self.db_listbox = tk.Listbox(list_row, height=5, selectmode="extended")
+        self.db_listbox.pack(side="left", fill="both", expand=True)
+        initial_db_paths = list(self.config.get("db_paths", []))
+        for p in initial_db_paths:
+            self.db_listbox.insert("end", p)
+        # If the persisted sector_label exactly matches what auto-derivation
+        # would produce from the persisted db_paths, treat it as still-auto
+        # (not a manual edit) so a returning user who adds/removes DBs keeps
+        # getting label updates -- otherwise _last_auto_sector_label's
+        # per-session "" default would make ANY persisted non-empty label
+        # look manually edited forever, even one that was never touched.
+        self._last_auto_sector_label = db_lookup.derive_sector_label(initial_db_paths)
+
+        list_buttons = ttk.Frame(list_row)
+        list_buttons.pack(side="left", padx=6)
+        ttk.Button(list_buttons, text="Add...", command=self._add_db_paths).pack(fill="x", pady=2)
+        ttk.Button(list_buttons, text="Remove selected", command=self._remove_selected_db_paths).pack(
+            fill="x", pady=2
         )
-        ttk.Button(db_row, text="Browse...", command=self._browse_db_path).pack(side="left")
+        ttk.Button(list_buttons, text="Clear all", command=self._clear_db_paths).pack(fill="x", pady=2)
+
+        ttk.Label(
+            db_frame,
+            text="Routing through an adjacent sector's systems can shorten hop distance "
+                 "or make an otherwise-unreachable candidate reachable -- select every "
+                 "sector DB you want included in the reachability graph.",
+            wraplength=560, justify="left", foreground="#666666",
+        ).pack(anchor="w", padx=6, pady=(0, 4))
 
         label_row = ttk.Frame(db_frame)
         label_row.pack(fill="x", padx=6, pady=(0, 6))
         ttk.Label(label_row, text="Sector label:").pack(side="left")
         ttk.Entry(label_row, textvariable=self.sector_label_var, width=40).pack(side="left", padx=(6, 0))
 
-        self.db_path_var.trace_add("write", lambda *_args: self._maybe_autofill_sector_label())
         self._maybe_autofill_sector_label()
 
         # -- Origin System --
@@ -126,9 +301,10 @@ class App:
         self.origin_combo = ttk.Combobox(origin_row, textvariable=self.origin_system_var, width=45)
         self.origin_combo.pack(side="left", padx=(6, 0), fill="x", expand=True)
         self.origin_combo.bind("<KeyRelease>", self._schedule_origin_search)
+        ttk.Button(origin_row, text="?", width=2, command=self._show_origin_help).pack(side="left", padx=(6, 0))
         ttk.Label(
             origin_frame,
-            text="Type to search systems in the selected DB (results appear in the dropdown).",
+            text="Type to search systems across all selected DBs (results appear in the dropdown).",
             foreground="#666666",
         ).pack(anchor="w", padx=6, pady=(0, 6))
 
@@ -149,42 +325,53 @@ class App:
         ttk.Label(grid, text="Densest-systems top N:").grid(row=2, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.dense_top_n_var, width=8).grid(row=2, column=1, sticky="w")
 
-        # -- Run / Cancel + log --
+        # -- Scoring --
+        scoring_frame = ttk.LabelFrame(parent, text="Scoring")
+        scoring_frame.pack(fill="x", padx=6, pady=6)
+        self.scoring_rubric = rubric_module.rubric_from_dict(self.config.get("scoring_rubric") or {})
+        scoring_row = ttk.Frame(scoring_frame)
+        scoring_row.pack(fill="x", padx=6, pady=6)
+        ttk.Button(scoring_row, text="Customize Scoring...", command=self._open_rubric_dialog).pack(side="left")
+        ttk.Button(scoring_row, text="?", width=2, command=self._show_rubric_help).pack(side="left", padx=(6, 0))
+        self.rubric_status_label = ttk.Label(scoring_row, text=self._rubric_status_text())
+        self.rubric_status_label.pack(side="left", padx=12)
+
+        # -- Run (Cancel/Status/Log live in the shared panel below the Notebook) --
         controls = ttk.Frame(parent)
         controls.pack(fill="x", padx=6, pady=6)
         self.run_button = ttk.Button(controls, text="Run", command=self._on_run)
         self.run_button.pack(side="left")
-        self.cancel_button = ttk.Button(controls, text="Cancel", command=self._on_cancel, state="disabled")
-        self.cancel_button.pack(side="left", padx=(6, 0))
-        self.status_label = ttk.Label(controls, text="Idle")
-        self.status_label.pack(side="left", padx=12)
 
-        log_frame = ttk.LabelFrame(parent, text="Log")
-        log_frame.pack(fill="both", expand=True, padx=6, pady=6)
-        self.log_text = tk.Text(log_frame, height=14, state="disabled", wrap="word")
-        log_scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=log_scroll.set)
-        self.log_text.pack(side="left", fill="both", expand=True)
-        log_scroll.pack(side="right", fill="y")
-
-    def _browse_db_path(self) -> None:
-        current = self.db_path_var.get().strip()
-        initialdir = str(Path(current).parent) if current else str(db_lookup.DEFAULT_SECTOR_LIBRARY_DIR)
-        chosen = filedialog.askopenfilename(
+    def _add_db_paths(self) -> None:
+        existing = list(self.db_listbox.get(0, "end"))
+        initialdir = str(Path(existing[-1]).parent) if existing else str(db_lookup.DEFAULT_SECTOR_LIBRARY_DIR)
+        chosen = filedialog.askopenfilenames(
             initialdir=initialdir,
             filetypes=[("Sector DB", "*.sqlite"), ("All files", "*.*")],
         )
-        if chosen:
-            self.db_path_var.set(chosen)
+        for path in chosen:
+            if path not in existing:
+                self.db_listbox.insert("end", path)
+                existing.append(path)
+        self._maybe_autofill_sector_label()
+
+    def _remove_selected_db_paths(self) -> None:
+        for index in reversed(self.db_listbox.curselection()):
+            self.db_listbox.delete(index)
+        self._maybe_autofill_sector_label()
+
+    def _clear_db_paths(self) -> None:
+        self.db_listbox.delete(0, "end")
+        self._maybe_autofill_sector_label()
 
     def _maybe_autofill_sector_label(self) -> None:
-        db_path = self.db_path_var.get().strip()
-        if not db_path:
+        db_paths = list(self.db_listbox.get(0, "end"))
+        if not db_paths:
             return
         current_label = self.sector_label_var.get().strip()
         if current_label and current_label != self._last_auto_sector_label:
             return  # user has manually edited it -- don't clobber
-        derived = db_lookup.derive_sector_label(db_path)
+        derived = db_lookup.derive_sector_label(db_paths)
         self.sector_label_var.set(derived)
         self._last_auto_sector_label = derived
 
@@ -195,10 +382,25 @@ class App:
 
     def _run_origin_search(self) -> None:
         self._search_after_id = None
-        db_path = self.db_path_var.get().strip()
-        text = self.origin_system_var.get()
-        matches = db_lookup.search_system_names(db_path, text, limit=50)
+        db_paths = list(self.db_listbox.get(0, "end"))
+        matches = db_lookup.search_system_names(db_paths, self.origin_system_var.get(), limit=50)
         self.origin_combo["values"] = matches
+
+    def _show_origin_help(self) -> None:
+        messagebox.showinfo("Origin System", ORIGIN_HELP_TEXT)
+
+    def _rubric_status_text(self) -> str:
+        return "Using stock defaults" if self.scoring_rubric == rubric_module.STOCK_RUBRIC else "Customized"
+
+    def _open_rubric_dialog(self) -> None:
+        dialog = rubric_module.RubricDialog(self.root, self.scoring_rubric)
+        self.root.wait_window(dialog)
+        if dialog.result is not None:
+            self.scoring_rubric = dialog.result
+            self.rubric_status_label.configure(text=self._rubric_status_text())
+
+    def _show_rubric_help(self) -> None:
+        messagebox.showinfo("How Scoring Works", rubric_module.format_rubric_help(self.scoring_rubric))
 
     # ------------------------------------------------------------------
     # Settings tab
@@ -228,7 +430,7 @@ class App:
         messagebox.showinfo("Settings", "Settings saved.")
 
     # ------------------------------------------------------------------
-    # Run / Cancel
+    # Run / Extract / Cancel
     # ------------------------------------------------------------------
     def _collect_config(self) -> dict[str, Any]:
         def _float_or(value: str, default: float) -> float:
@@ -243,24 +445,33 @@ class App:
             except ValueError:
                 return default
 
-        self.config["db_path"] = self.db_path_var.get().strip()
+        self.config["db_paths"] = list(self.db_listbox.get(0, "end"))
         self.config["sector_label"] = self.sector_label_var.get().strip()
         self.config["origin_system"] = self.origin_system_var.get().strip()
         self.config["max_jump_ly"] = _float_or(self.max_jump_ly_var.get(), 15.0)
         self.config["max_hops"] = _int_or(self.max_hops_var.get(), 8)
         self.config["dense_top_n"] = _int_or(self.dense_top_n_var.get(), 20)
         self.config["out_dir"] = self.out_dir_var.get().strip()
+        self.config["scoring_rubric"] = rubric_module.rubric_to_dict(self.scoring_rubric)
         return self.config
 
     def _on_run(self) -> None:
         if self.worker.is_running():
+            messagebox.showinfo(
+                "Job running", "Another job is already running. Wait for it to finish or cancel it first."
+            )
             return
         cfg = self._collect_config()
 
-        db_path = cfg["db_path"]
-        if not db_path or not Path(db_path).exists():
+        db_paths = cfg["db_paths"]
+        if not db_paths:
+            messagebox.showwarning("No sector DBs selected", "Add at least one sector DB before running.")
+            return
+        missing = [p for p in db_paths if not Path(p).exists()]
+        if missing:
             messagebox.showerror(
-                "Database not found", f"No sector DB found at:\n\n{db_path or '(not set)'}"
+                "Database(s) not found",
+                "The following sector DB(s) no longer exist:\n\n" + "\n".join(missing),
             )
             return
         if not cfg["sector_label"]:
@@ -270,12 +481,12 @@ class App:
         if not origin:
             messagebox.showwarning("Origin system required", "Enter an origin system before running.")
             return
-        if not db_lookup.system_exists(db_path, origin):
-            suggestions = db_lookup.search_system_names(db_path, origin, limit=8)
+        if not db_lookup.system_exists(db_paths, origin):
+            suggestions = db_lookup.search_system_names(db_paths, origin, limit=8)
             detail = ""
             if suggestions:
                 detail = "\n\nDid you mean:\n  " + "\n  ".join(suggestions)
-            messagebox.showerror("System not found", f"{origin!r} was not found in this DB.{detail}")
+            messagebox.showerror("System not found", f"{origin!r} was not found in any selected DB.{detail}")
             return
         if cfg["max_jump_ly"] <= 0:
             messagebox.showwarning("Invalid parameter", "Max jump (ly) must be greater than 0.")
@@ -298,9 +509,15 @@ class App:
         started = self.worker.start(pipeline.run_reachability_pipeline, cfg)
         if not started:
             return
-        self.run_button.configure(state="disabled")
-        self.cancel_button.configure(state="normal")
-        self.status_label.configure(text="Running...")
+        self._set_controls_running(True)
+
+    def _set_controls_running(self, running: bool) -> None:
+        state = "disabled" if running else "normal"
+        self.run_button.configure(state=state)
+        self.extract_button.configure(state=state)
+        self.cancel_button.configure(state=("normal" if running else "disabled"))
+        if running:
+            self.status_label.configure(text="Running...")
 
     def _on_cancel(self) -> None:
         if self.worker.is_running():
@@ -308,8 +525,7 @@ class App:
             self.status_label.configure(text="Cancelling...")
 
     def _on_job_done(self, returncode: str) -> None:
-        self.run_button.configure(state="normal")
-        self.cancel_button.configure(state="disabled")
+        self._set_controls_running(False)
         self.status_label.configure(text=f"Idle (last run exit={returncode})")
 
         if returncode == "0" and self._pending_result_paths is not None:
@@ -321,6 +537,26 @@ class App:
             except OSError as exc:
                 messagebox.showerror("Load failed", f"Could not load results:\n\n{exc}")
         self._pending_result_paths = None
+
+        if returncode == "0" and self._pending_extracted_db_paths is not None:
+            self._offer_extracted_dbs(self._pending_extracted_db_paths)
+        self._pending_extracted_db_paths = None
+
+    def _offer_extracted_dbs(self, db_paths: list[str]) -> None:
+        """Auto-adds the newly extracted DBs to the Run tab's DB listbox
+        (deduped) and logs a confirmation -- closes the loop between
+        prepping data and using it, matching this app's existing
+        low-friction feel."""
+        existing = list(self.db_listbox.get(0, "end"))
+        added = []
+        for p in db_paths:
+            if p not in existing:
+                self.db_listbox.insert("end", p)
+                existing.append(p)
+                added.append(p)
+        self._maybe_autofill_sector_label()
+        if added:
+            self._append_log(f"Added {len(added)} new sector DB(s) to the Run tab's DB selection.")
 
     # ------------------------------------------------------------------
     # Log polling
@@ -344,6 +580,9 @@ class App:
                     payload = line.split(":", 1)[1]
                     candidates_str, dense_str = payload.split(pipeline.RESULT_SEP, 1)
                     self._pending_result_paths = (Path(candidates_str), Path(dense_str))
+                elif line.startswith(pipeline.EXTRACT_RESULT_SENTINEL + ":"):
+                    payload = line.split(":", 1)[1]
+                    self._pending_extracted_db_paths = payload.split(pipeline.EXTRACT_RESULT_SEP)
                 else:
                     self._append_log(line)
         except queue.Empty:
@@ -362,6 +601,7 @@ class App:
             return
         self.worker.cancel()
         self.run_button.configure(state="disabled")
+        self.extract_button.configure(state="disabled")
         self.cancel_button.configure(state="disabled")
         self.status_label.configure(text="Cancelling -- please wait before closing...")
         self._wait_for_shutdown(0)
