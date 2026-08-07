@@ -4,7 +4,10 @@ __pycache__/
 data/sector_library/*.md
 data/source_data/
 data/Journal.*.log
-out/
+out/*
+!out/Eotchorts_EG-X_d1-265_to_Eotchorts_FG-X_d1-435_shortest_path.csv
+!out/Eotchorts_Eotchorts_EG-X_d1-265_colonization_candidates.csv
+!out/Eotchorts_Eotchorts_EG-X_d1-265_densest_systems.csv
 build/
 dist/
 dist-installer/
