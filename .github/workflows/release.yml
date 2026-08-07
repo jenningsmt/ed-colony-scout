@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
           pip install -r requirements-build.txt
@@ -29,14 +29,43 @@ jobs:
       - name: Run tests
         run: python -m unittest discover tests -v
 
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
       - name: Build executable
         run: pyinstaller packaging/ed_colony_scout.spec --clean
 
-      - name: Zip build output
-        run: Compress-Archive -Path "dist/ED Colony Scout/*" -DestinationPath "ED-Colony-Scout-${{ github.ref_name }}-win64.zip"
+      - name: Build installer
+        run: iscc packaging/installer.iss
+
+      - name: Compute SHA-256 checksum
+        id: checksum
+        run: |
+          $installer = Get-ChildItem "dist-installer\ED-Colony-Scout-Setup-*.exe" | Select-Object -First 1
+          $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash
+          "path=$($installer.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($installer.Name)" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ED-Colony-Scout-${{ github.ref_name }}-win64.zip
+          files: ${{ steps.checksum.outputs.path }}
           generate_release_notes: true
+          body: |
+            ### Verify your download
+
+            SHA-256 checksum of `${{ steps.checksum.outputs.name }}`:
+
+            ```
+            ${{ steps.checksum.outputs.sha256 }}
+            ```
+
+            Verify with PowerShell after downloading:
+            ```
+            Get-FileHash .\${{ steps.checksum.outputs.name }} -Algorithm SHA256
+            ```
+
+            The installer is unsigned -- see the README's
+            [Antivirus and SmartScreen warnings](../../blob/main/README.md#antivirus-and-smartscreen-warnings)
+            section for what to expect and how to verify the file is genuine.

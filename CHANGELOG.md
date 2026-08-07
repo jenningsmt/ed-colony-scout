@@ -28,6 +28,12 @@ worked use-example added just prior.
   included in `out/` as reviewable examples.
 - Packaged Windows executable via PyInstaller (`packaging/`): windowed
   onedir build, app icon (window + exe file), embedded version resource.
+- Per-user Inno Setup installer (`packaging/installer.iss`,
+  `ED-Colony-Scout-Setup-X.Y.Z.exe`) with upgrade-safe hygiene (closes a
+  running app before installing, wipes the prior bundle directory so stale
+  files can't accumulate across upgrades) and a matching "Antivirus and
+  SmartScreen warnings" README section covering checksum verification and
+  false-positive recovery, since the installer isn't code-signed.
 - Automated test suite (`tests/`, stdlib `unittest`) covering extraction,
   scoring, reachability, path-finding, and the System Detail data layer
   against a small fixture sector built through the real extraction
@@ -36,6 +42,20 @@ worked use-example added just prior.
   every push/PR) and a release workflow
   (`.github/workflows/release.yml`, builds and publishes the packaged exe
   to a GitHub Release on `v*` tag push, gated on tests passing).
+
+### Security
+- `ED-Colony-Scout-Setup-1.0.0.exe` scanned on VirusTotal before release:
+  [full report](https://www.virustotal.com/gui/file/4eabec8a9c05b0da9fefbd5cd644a6f604317959f91235a8bc23be9145e51764).
+  5 of 71 engines flagged it; none are mainstream consumer antivirus
+  products (Defender, Kaspersky, ESET, Sophos, BitDefender, Avast, AVG,
+  Malwarebytes, Symantec, TrendMicro all report clean), and the flags trace
+  to generic obfuscation heuristics and a Sigma rule that specifically
+  targets PyInstaller/py2exe/cx_Freeze-bundled executables in general, not
+  an identified threat. See the README's
+  [Antivirus and SmartScreen warnings](README.md#antivirus-and-smartscreen-warnings)
+  section for full detail.
+- SHA-256 (`ED-Colony-Scout-Setup-1.0.0.exe`):
+  `4EABEC8A9C05B0DA9FEFBD5CD644A6F604317959F91235A8BC23BE9145E51764`
 
 ### Fixed
 - `gui/db_lookup.DEFAULT_SECTOR_LIBRARY_DIR` now resolves against the same

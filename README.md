@@ -32,9 +32,27 @@ kind — see [Data privacy](#data-privacy) below.
   planetary bodies. Double-click any system name in these tables (or in
   Path Finder's results) to open a **System Detail** popup — see below.
 
-## Installation (running from source)
+## Installation (end users)
 
-There's no packaged installer yet — run it from a Python checkout:
+If you just want to run the app rather than work with the scripts directly:
+
+1. Download the latest installer (`ED-Colony-Scout-Setup-X.Y.Z.exe`) from
+   this repo's [Releases](../../releases) page and run it. It installs
+   per-user (no admin rights needed) and adds a Desktop/Start Menu
+   shortcut. Since the installer and app aren't code-signed, Windows
+   SmartScreen (and possibly your antivirus) will treat it with suspicion
+   the first time — see
+   [Antivirus and SmartScreen warnings](#antivirus-and-smartscreen-warnings)
+   below before you download, so you know what to expect and how to verify
+   the file.
+2. Launch **ED Colony Scout** from the Desktop shortcut and follow
+   [Getting started](#getting-started) below.
+
+Building from source instead (for development, or to build your own
+installer) is covered in [Installation (running from source)](#installation-running-from-source)
+and [Building a release](#building-a-release) below.
+
+## Installation (running from source)
 
 ```bash
 git clone <this repo>
@@ -46,27 +64,97 @@ python -m gui.main
 Requires **Python 3.10+** (the codebase uses `from __future__ import
 annotations` and PEP 604-style unions throughout).
 
-## Building the executable
+## Antivirus and SmartScreen warnings — what to expect and what to do
 
-A standalone Windows executable can be built with
-[PyInstaller](https://pyinstaller.org/):
+ED Colony Scout is a small open-source tool. Its releases are currently
+**not code-signed** (code-signing certificates are expensive and reputation
+takes time to build), so Windows and some antivirus products will treat the
+installer with suspicion the first time they see it. **This is expected and
+does not mean anything is wrong with the file** — it means Windows has never
+seen this exact file before and no publisher identity is attached to it.
+You can (and should) verify the download yourself; instructions below.
 
-```bash
-pip install -r requirements.txt
-pip install -r requirements-build.txt
-powershell -File packaging/build.ps1
-```
+### First: verify your download
 
-This produces a windowed (no console) build at
-`dist/ED Colony Scout/ED Colony Scout.exe`. It's a **onedir** build rather
-than a single-file exe -- onefile's self-extraction-to-a-temp-dir on every
-launch is a well-documented trigger for antivirus/SmartScreen false
-positives on unsigned executables, and this build isn't code-signed. Zip
-the whole `dist/ED Colony Scout/` folder for distribution.
+Every release on the [Releases](../../releases) page lists a SHA-256
+checksum for the installer. After downloading, open PowerShell and run:
 
-**The exe is unsigned.** Windows SmartScreen will show an "unrecognized
-app" warning the first time it's run (click "More info" -> "Run anyway").
-This is expected for an unsigned hobby tool, not a sign of a bad download.
+    Get-FileHash .\ED-Colony-Scout-Setup-X.Y.Z.exe -Algorithm SHA256
+
+If the hash printed matches the one in the release notes, your file is
+byte-for-byte the one the maintainer published, and the warnings below are
+safe to click through. If it does **not** match, delete the file and
+re-download from the Releases page only — never from a third-party mirror.
+
+### "Windows protected your PC" (SmartScreen) — blue dialog
+
+This appears because the installer is new and unsigned, not because
+anything harmful was detected. If your checksum matched:
+
+1. Click **More info**.
+2. Click **Run anyway**.
+
+That's it — SmartScreen only gates the first run.
+
+### Your antivirus flags, quarantines, or deletes the file
+
+Some antivirus products go further than a warning and quarantine the
+installer or the installed `ED Colony Scout.exe`. This is a **false
+positive** with a known cause: the app is packaged with PyInstaller (a
+standard tool that bundles a Python program and the Python runtime into an
+exe), and because some actual malware is also built with PyInstaller, a few
+antivirus engines flag *everything* built with it. See PyInstaller's own
+[note on antivirus false positives](https://github.com/pyinstaller/pyinstaller/blob/develop/.github/ISSUE_TEMPLATE/antivirus.md).
+
+If this happens:
+
+1. **Verify the checksum first** (above). Only proceed if it matches.
+2. **Restore the file from quarantine** using your AV's quarantine/history
+   screen (the wording varies: "Restore", "Allow", "Not a threat").
+3. **Add an exclusion** so it doesn't recur — either for the installer
+   file, or (after installing) for the app folder:
+   `%LOCALAPPDATA%\Programs\EDColonyScout`
+   In Windows Security this is under: Virus & threat protection →
+   Manage settings → Exclusions → Add or remove exclusions.
+4. Optionally, **report the false positive** to your AV vendor — this
+   genuinely helps: enough reports get the file whitelisted for everyone.
+
+**Never add exclusions for files whose checksum you haven't verified.**
+The verify-then-restore order matters: the checksum is what tells you the
+flagged file really is the one published here.
+
+### v1.0.0 VirusTotal scan
+
+The v1.0.0 installer was scanned on VirusTotal before release:
+[full report](https://www.virustotal.com/gui/file/4eabec8a9c05b0da9fefbd5cd644a6f604317959f91235a8bc23be9145e51764).
+
+**5 of 71 engines flagged it, and none of them are mainstream consumer
+antivirus products** — Windows Defender, Kaspersky, ESET, Sophos,
+BitDefender, Avast, AVG, Malwarebytes, Symantec, and TrendMicro all report
+it clean. The three named detections (Arctic Wolf, SecureAge, Trapmine) use
+generic labels (`obfuscated/poly`) rather than identifying a known malware
+family, and the associated Sigma rule matches are explainable: one fires on
+*any* new executable being created, and another ("Python Image Load By
+Non-Python Process") exists specifically to flag PyInstaller/py2exe/
+cx_Freeze-bundled executables in general — exactly the false-positive
+pattern described above, not something specific to this app's behavior.
+
+SHA-256 of the scanned file (`ED-Colony-Scout-Setup-1.0.0.exe`):
+
+    4EABEC8A9C05B0DA9FEFBD5CD644A6F604317959F91235A8BC23BE9145E51764
+
+Each release gets its own checksum (see
+[First: verify your download](#first-verify-your-download) above) and
+ideally its own scan; this section reflects v1.0.0 specifically and will be
+updated (or superseded by a per-release note) as new versions ship.
+
+### Why not just sign the releases?
+
+Code signing is a possible future improvement (e.g. via
+[SignPath Foundation](https://signpath.org/), which offers free signing for
+qualifying open-source projects) but isn't in place yet. Until then,
+checksums + this documentation are the interim answer. If a release is ever
+signed, this section will be updated.
 
 ## Getting started
 
@@ -252,6 +340,36 @@ into its tables.
 - Everything else (`sqlite3`, `csv`, `json`, `argparse`, `tkinter`, `dataclasses`, ...)
   is standard library.
 
+## Building a release
+
+Packaging is manual (no CI currently builds releases automatically outside
+of a tag push — see `.github/workflows/release.yml`) — from a Windows
+machine with [Inno Setup](https://jrsoftware.org/isinfo.php) installed
+(`iscc` on PATH):
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-build.txt
+powershell -File packaging/build.ps1
+```
+
+This runs both steps in order — `pyinstaller packaging/ed_colony_scout.spec
+--clean` (producing the `dist/ED Colony Scout/` onedir build) then `iscc
+packaging/installer.iss` (wrapping it into
+`dist-installer/ED-Colony-Scout-Setup-X.Y.Z.exe`) — and prints the
+installer's SHA-256 checksum at the end, ready to paste into the release
+notes. Bump `MyAppVersion` in `packaging/installer.iss` **and**
+`filevers`/`prodvers`/`FileVersion`/`ProductVersion` in
+`packaging/version_info.txt` **and** `gui/config.py`'s `APP_VERSION`
+together before building a new release.
+
+Neither `dist/` nor `dist-installer/` are committed to git (see
+`.gitignore`) — attach the built installer `.exe` to a new GitHub Release
+instead; it's a compiled binary and doesn't belong in git history. Pushing
+a `v*` tag triggers `.github/workflows/release.yml`, which builds and
+publishes the installer (with its checksum) automatically, gated on the
+test suite passing.
+
 ## Repository layout
 
 ```
@@ -273,7 +391,7 @@ gui/
   main.py           Entry point (`python -m gui.main`, and the PyInstaller build target)
 
 tests/               Automated test suite (stdlib unittest) against a small fixture sector
-packaging/           PyInstaller spec, icon, version resource, and build script for the .exe
+packaging/           PyInstaller spec, Inno Setup installer script, icon, version resource, build script
 
 data/sector_library/   Extracted per-sector SQLite DBs (gitignored)
 out/                   Generated CSV reports (gitignored)
