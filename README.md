@@ -139,7 +139,15 @@ code). `Wacatac.B!ml` is one of the most commonly reported Defender
 false-positive labels for exactly this situation — unsigned, freshly-built
 PyInstaller executables — but the honest takeaway is that **some users on
 this release may see a real Defender warning**, not just a lesser-known
-engine's. The matched Sigma rules are the same generic PyInstaller-bundling
+engine's.
+
+A false-positive report was submitted to Microsoft on 2026-08-07
+(submission ID `3c2c969b-9b4f-4418-9dde-c56455044cb6`) via their
+[file submission portal](https://www.microsoft.com/en-us/wdsi/filesubmission);
+as of this writing it's pending review. This section will be updated once
+that resolves.
+
+The matched Sigma rules are the same generic PyInstaller-bundling
 patterns as before (one fires on *any* new executable being created;
 "Python Image Load By Non-Python Process" and "Potential Python DLL
 Sideloading" both exist specifically to flag PyInstaller/py2exe/
