@@ -11,7 +11,7 @@ this project uses [Semantic Versioning](https://semver.org/).
 > string") rather than independently verified against a tag -- flagged here
 > so that inference isn't mistaken for a verified release record.
 
-## [1.0.0] - 2026-08-06
+## [1.0.0] - 2026-08-07
 
 First packaged release: a standalone Windows executable, an automated test
 suite, and CI/release workflows, alongside the System Detail popup and
@@ -44,18 +44,23 @@ worked use-example added just prior.
   to a GitHub Release on `v*` tag push, gated on tests passing).
 
 ### Security
-- `ED-Colony-Scout-Setup-1.0.0.exe` scanned on VirusTotal before release:
-  [full report](https://www.virustotal.com/gui/file/4eabec8a9c05b0da9fefbd5cd644a6f604317959f91235a8bc23be9145e51764).
-  5 of 71 engines flagged it; none are mainstream consumer antivirus
-  products (Defender, Kaspersky, ESET, Sophos, BitDefender, Avast, AVG,
-  Malwarebytes, Symantec, TrendMicro all report clean), and the flags trace
-  to generic obfuscation heuristics and a Sigma rule that specifically
-  targets PyInstaller/py2exe/cx_Freeze-bundled executables in general, not
-  an identified threat. See the README's
+- The actual `v1.0.0` GitHub Release asset (built by `release.yml`, not a
+  local dev build) was scanned on VirusTotal:
+  [full report](https://www.virustotal.com/gui/file/7bfac9513ffbf397ed376e5100b68ba435ce23c37cee7a9c5624d89b7074133d).
+  7 of 71 engines flagged it, all with generic obfuscation/ML-heuristic
+  labels (`trojan.obfuscatedpoly`), not an identified malware family.
+  Notably Microsoft/Windows Defender is among them
+  (`Trojan:Win32/Wacatac.B!ml`, a cloud ML classifier flag, not a signature
+  match) — a commonly reported false-positive label for unsigned freshly-
+  built PyInstaller executables, but real enough that some users on this
+  release may see an actual Defender warning. A local dev build of the
+  identical source scanned cleaner (5/71, no Defender flag), confirming
+  PyInstaller builds aren't byte-reproducible between machines — scan the
+  actual release asset, not a dev build. See the README's
   [Antivirus and SmartScreen warnings](README.md#antivirus-and-smartscreen-warnings)
   section for full detail.
-- SHA-256 (`ED-Colony-Scout-Setup-1.0.0.exe`):
-  `4EABEC8A9C05B0DA9FEFBD5CD644A6F604317959F91235A8BC23BE9145E51764`
+- SHA-256 (`ED-Colony-Scout-Setup-1.0.0.exe`, the actual release asset):
+  `7BFAC9513FFBF397ED376E5100B68BA435CE23C37CEE7A9C5624D89B7074133D`
 
 ### Fixed
 - `gui/db_lookup.DEFAULT_SECTOR_LIBRARY_DIR` now resolves against the same

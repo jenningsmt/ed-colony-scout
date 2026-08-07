@@ -125,28 +125,38 @@ flagged file really is the one published here.
 
 ### v1.0.0 VirusTotal scan
 
-The v1.0.0 installer was scanned on VirusTotal before release:
-[full report](https://www.virustotal.com/gui/file/4eabec8a9c05b0da9fefbd5cd644a6f604317959f91235a8bc23be9145e51764).
+The actual `v1.0.0` release asset (built by the `release.yml` GitHub Actions
+workflow, not a local dev build) was scanned on VirusTotal:
+[full report](https://www.virustotal.com/gui/file/7bfac9513ffbf397ed376e5100b68ba435ce23c37cee7a9c5624d89b7074133d).
 
-**5 of 71 engines flagged it, and none of them are mainstream consumer
-antivirus products** — Windows Defender, Kaspersky, ESET, Sophos,
-BitDefender, Avast, AVG, Malwarebytes, Symantec, and TrendMicro all report
-it clean. The three named detections (Arctic Wolf, SecureAge, Trapmine) use
-generic labels (`obfuscated/poly`) rather than identifying a known malware
-family, and the associated Sigma rule matches are explainable: one fires on
-*any* new executable being created, and another ("Python Image Load By
-Non-Python Process") exists specifically to flag PyInstaller/py2exe/
-cx_Freeze-bundled executables in general — exactly the false-positive
-pattern described above, not something specific to this app's behavior.
+**7 of 71 engines flagged it.** All use generic obfuscation/ML-heuristic
+labels (`trojan.obfuscatedpoly`) rather than identifying a known malware
+family — Arctic Wolf, CrowdStrike Falcon, DeepInstinct, Microsoft, SecureAge,
+Skyhigh SWG, and Trapmine. **Notably, Microsoft/Windows Defender is among
+them this time** (`Trojan:Win32/Wacatac.B!ml` — the `!ml` suffix means it's
+Defender's cloud ML classifier, not a signature match against known malware
+code). `Wacatac.B!ml` is one of the most commonly reported Defender
+false-positive labels for exactly this situation — unsigned, freshly-built
+PyInstaller executables — but the honest takeaway is that **some users on
+this release may see a real Defender warning**, not just a lesser-known
+engine's. The matched Sigma rules are the same generic PyInstaller-bundling
+patterns as before (one fires on *any* new executable being created;
+"Python Image Load By Non-Python Process" and "Potential Python DLL
+Sideloading" both exist specifically to flag PyInstaller/py2exe/
+cx_Freeze-bundled executables and their bundled runtime DLL in general) —
+not something specific to this app's actual behavior.
 
 SHA-256 of the scanned file (`ED-Colony-Scout-Setup-1.0.0.exe`):
 
-    4EABEC8A9C05B0DA9FEFBD5CD644A6F604317959F91235A8BC23BE9145E51764
+    7BFAC9513FFBF397ED376E5100B68BA435CE23C37CEE7A9C5624D89B7074133D
 
-Each release gets its own checksum (see
+This matters because **PyInstaller builds aren't byte-reproducible between
+machines** — a local dev build of identical source code scores differently
+(5/71, no Defender flag) than the CI-built release asset above. Each
+release gets its own checksum (see
 [First: verify your download](#first-verify-your-download) above) and
-ideally its own scan; this section reflects v1.0.0 specifically and will be
-updated (or superseded by a per-release note) as new versions ship.
+should get its own scan of the actual published asset, not a dev build;
+this section reflects `v1.0.0`'s real release asset specifically.
 
 ### Why not just sign the releases?
 
