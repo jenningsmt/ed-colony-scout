@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Optional
 
 from gui import config as config_module
-from gui import db_lookup, pipeline, treeview_utils
+from gui import db_lookup, pipeline, system_detail, treeview_utils
 from gui import rubric as rubric_module
 from gui.treeview_utils import ColumnSpec
 from gui.worker import DONE_SENTINEL, Worker
@@ -127,7 +127,11 @@ class App:
         self._build_run_tab(self.run_tab)
         self._build_path_finder_tab(self.path_finder_tab)
         self.candidates_tree = treeview_utils.build_tree(self.candidates_tab, CANDIDATES_COLUMNS)
+        self.candidates_tree.bind(
+            "<Double-1>", lambda e: self._on_system_row_double_click(e, self.candidates_tree)
+        )
         self.dense_tree = treeview_utils.build_tree(self.dense_tab, DENSEST_COLUMNS)
+        self.dense_tree.bind("<Double-1>", lambda e: self._on_system_row_double_click(e, self.dense_tree))
         self._build_settings_tab(self.settings_tab)
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -433,6 +437,30 @@ class App:
     def _show_rubric_help(self) -> None:
         messagebox.showinfo("How Scoring Works", rubric_module.format_rubric_help(self.scoring_rubric))
 
+    def _on_system_row_double_click(self, event: tk.Event, tree: ttk.Treeview) -> None:
+        """Shared by every results tree (Candidates, Densest Systems, both
+        Path Finder trees) since they all key a "system_name" column the
+        same way -- double-clicking a row opens the read-only System Detail
+        popup for that system."""
+        item_id = tree.identify_row(event.y)
+        if not item_id:
+            return
+        name = tree.set(item_id, "system_name")
+        if not name:
+            return
+        db_paths = list(self.db_listbox.get(0, "end"))
+        detail = db_lookup.get_system_detail(db_paths, name)
+        if detail is None:
+            messagebox.showinfo(
+                "System not found",
+                f"{name!r} was not found in the currently selected DB(s).\n\n"
+                "This can happen if the DB selection changed after this result "
+                "was generated.",
+                parent=self.root,
+            )
+            return
+        system_detail.SystemDetailDialog(self.root, detail)
+
     # ------------------------------------------------------------------
     # Path Finder tab
     # ------------------------------------------------------------------
@@ -537,9 +565,13 @@ class App:
 
         ttk.Label(results_frame, text="Candidates Considered:").pack(anchor="w", padx=6)
         self.pf_candidates_tree = treeview_utils.build_tree(results_frame, PF_CANDIDATES_COLUMNS)
+        self.pf_candidates_tree.bind(
+            "<Double-1>", lambda e: self._on_system_row_double_click(e, self.pf_candidates_tree)
+        )
 
         ttk.Label(results_frame, text="Hop Path:").pack(anchor="w", padx=6, pady=(6, 0))
         self.pf_path_tree = treeview_utils.build_tree(results_frame, PF_PATH_COLUMNS)
+        self.pf_path_tree.bind("<Double-1>", lambda e: self._on_system_row_double_click(e, self.pf_path_tree))
 
         self._refresh_pf_mode()
 

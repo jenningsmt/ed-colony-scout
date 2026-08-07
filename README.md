@@ -27,7 +27,8 @@ kind — see [Data privacy](#data-privacy) below.
     many hops) a colony claim on that target is actually launchable.
 - **Candidates** / **Densest Systems** — sortable result tables: colonization
   candidates ranked by score, and the reachable systems with the most
-  planetary bodies.
+  planetary bodies. Double-click any system name in these tables (or in
+  Path Finder's results) to open a **System Detail** popup — see below.
 
 ## Installation (running from source)
 
@@ -156,6 +157,18 @@ Both modes also write their results to CSV in the configured output
 directory (Settings tab), in addition to populating the tables in the GUI.
 
 ![ED Colony Scout — Path Finder tab, Reachable? mode](docs/images/path-finder-reachable-tab.png)
+
+## System Detail popup
+
+Double-click any system name — in Candidates, Densest Systems, or either of
+the Path Finder result tables — to open a read-only breakdown of that
+system: every stellar and planetary body, which ones are landable, their
+terraform state, biosignal/geosignal counts (with cleaned-up biological
+genus names where the dump reports them), and every ring with its class and
+mass/radius. It reads directly from whichever sector database(s) are
+currently selected on the Run tab, so if that selection has changed since a
+result was generated, you'll get a "not found" message instead of stale or
+mismatched data.
 
 ## Source data: the galaxy dump
 
