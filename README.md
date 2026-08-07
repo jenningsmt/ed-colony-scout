@@ -1,5 +1,7 @@
 # ED Colony Scout
 
+<img src="icon.png" alt="ED Colony Scout icon" width="128" />
+
 Colonization-planning tooling for Elite Dangerous: given an already-extracted
 sector of the galaxy, rank nearby systems by colonization value, chart the
 actual jump-chain path between two systems, and check whether a target
@@ -43,6 +45,28 @@ python -m gui.main
 
 Requires **Python 3.10+** (the codebase uses `from __future__ import
 annotations` and PEP 604-style unions throughout).
+
+## Building the executable
+
+A standalone Windows executable can be built with
+[PyInstaller](https://pyinstaller.org/):
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-build.txt
+powershell -File packaging/build.ps1
+```
+
+This produces a windowed (no console) build at
+`dist/ED Colony Scout/ED Colony Scout.exe`. It's a **onedir** build rather
+than a single-file exe -- onefile's self-extraction-to-a-temp-dir on every
+launch is a well-documented trigger for antivirus/SmartScreen false
+positives on unsigned executables, and this build isn't code-signed. Zip
+the whole `dist/ED Colony Scout/` folder for distribution.
+
+**The exe is unsigned.** Windows SmartScreen will show an "unrecognized
+app" warning the first time it's run (click "More info" -> "Run anyway").
+This is expected for an unsigned hobby tool, not a sign of a bad download.
 
 ## Getting started
 
@@ -241,11 +265,15 @@ gui/
   app.py            Tkinter window: Prep Sectors, Run, Path Finder, Candidates, Densest Systems, Settings tabs
   worker.py         Background-thread job runner (stdout capture, cooperative cancellation)
   pipeline.py       Orchestrates scripts/ calls for the GUI, relays results back via a sentinel-line convention
-  db_lookup.py      Read-only sqlite helpers backing the DB/origin/target pickers (type-ahead search, etc.)
+  db_lookup.py      Read-only sqlite helpers backing the DB/origin/target pickers and System Detail popup
+  system_detail.py  The System Detail popup (double-click a system name in any results table)
   rubric.py         Scoring-rubric config<->dataclass round-trip, help text, and the customization dialog
   treeview_utils.py Generic sortable-Treeview + CSV/dict-loading helpers for the results tables
   config.py         Persisted settings (%APPDATA%\EDColonyScout\config.json)
-  main.py           Entry point (`python -m gui.main`)
+  main.py           Entry point (`python -m gui.main`, and the PyInstaller build target)
+
+tests/               Automated test suite (stdlib unittest) against a small fixture sector
+packaging/           PyInstaller spec, icon, version resource, and build script for the .exe
 
 data/sector_library/   Extracted per-sector SQLite DBs (gitignored)
 out/                   Generated CSV reports (gitignored)

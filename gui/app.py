@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -1004,8 +1005,20 @@ class App:
         )
 
 
+def _icon_path() -> Path:
+    """Resolves icon.png for the running window's iconphoto: the frozen
+    exe's bundled copy (sys._MEIPASS, set by PyInstaller -- see
+    packaging/ed_colony_scout.spec's `datas`) when packaged, or the
+    repo-root icon.png when run from source."""
+    base = Path(getattr(sys, "_MEIPASS", None) or Path(__file__).resolve().parent.parent)
+    return base / "icon.png"
+
+
 def main() -> None:
     root = tk.Tk()
+    icon_path = _icon_path()
+    if icon_path.exists():
+        root.iconphoto(True, tk.PhotoImage(file=str(icon_path)))
     App(root)
     root.mainloop()
 

@@ -16,7 +16,7 @@ from typing import Any
 APP_NAME = "EDColonyScout"
 
 # Displayed in the window title.
-APP_VERSION = "0.3.0"
+APP_VERSION = "1.0.0"
 
 
 def _default_out_dir() -> str:
@@ -26,7 +26,7 @@ def _default_out_dir() -> str:
     return str(base / APP_NAME / "out")
 
 
-def _default_sector_library_dir() -> str:
+def default_sector_library_dir() -> str:
     base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
     return str(base / APP_NAME / "sector_library")
 
@@ -42,7 +42,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "scoring_rubric": {},  # empty = stock rubric (see gui/rubric.rubric_from_dict)
     "galaxy_dump_path": "",
     "sector_prefixes": [],
-    "sector_library_dir": _default_sector_library_dir(),
+    "sector_library_dir": default_sector_library_dir(),
     # -- Path Finder tab --
     "pf_origin_system": "",
     "pf_target_system": "",

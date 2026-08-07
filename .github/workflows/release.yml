@@ -1,0 +1,42 @@
+name: Release
+
+# Triggered by pushing a version tag (e.g. `git tag v1.0.0 && git push origin
+# v1.0.0`), matching this repo's existing tagging convention. Tests gate the
+# build -- a release is never published from a failing test suite.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-build.txt
+
+      - name: Run tests
+        run: python -m unittest discover tests -v
+
+      - name: Build executable
+        run: pyinstaller packaging/ed_colony_scout.spec --clean
+
+      - name: Zip build output
+        run: Compress-Archive -Path "dist/ED Colony Scout/*" -DestinationPath "ED-Colony-Scout-${{ github.ref_name }}-win64.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ED-Colony-Scout-${{ github.ref_name }}-win64.zip
+          generate_release_notes: true

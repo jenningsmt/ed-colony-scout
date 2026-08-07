@@ -8,7 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_SECTOR_LIBRARY_DIR = Path(__file__).resolve().parent.parent / "data" / "sector_library"
+from gui import config as config_module
+
+# Matches config.default_sector_library_dir() (the %LOCALAPPDATA%-based
+# path a fresh config actually resolves to) rather than a path relative to
+# this source file -- the latter resolves somewhere inside a PyInstaller
+# temp/install bundle when frozen, where "data/sector_library" won't exist.
+# Only used as a Tkinter file-dialog initialdir cosmetic fallback (see
+# gui/app.py's Add... button), never for real data resolution.
+DEFAULT_SECTOR_LIBRARY_DIR = Path(config_module.default_sector_library_dir())
 
 
 def _derive_sector_label_one(db_path: str) -> str:
