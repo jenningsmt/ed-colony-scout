@@ -228,6 +228,13 @@ reachability graph (you can route *through* an inhabited system on the way
 to somewhere else); they're simply excluded from the ranked Candidates and
 Densest Systems output, since you can't found a new colony there.
 
+Since v1.1.0, a system whose stored data can't be read is treated as
+**unknown** rather than eligible: it's excluded from the rankings the same
+way, and the run's log says how many were. It isn't counted as an occupied
+system by the reachability check either. Systems without a complete, valid
+position can't be placed on the map at all, so they're left out of the
+graph and counted in the log.
+
 ## Scoring
 
 Every reachable, colonization-eligible system earns points across five

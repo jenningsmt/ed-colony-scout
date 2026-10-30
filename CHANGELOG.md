@@ -11,6 +11,54 @@ this project uses [Semantic Versioning](https://semver.org/).
 > string") rather than independently verified against a tag -- flagged here
 > so that inference isn't mistaken for a verified release record.
 
+## [1.1.0] - Unreleased
+
+Reliability fixes from an engineering review of the Zurara Bridge research
+tooling. Results on clean data are unchanged, except that systems with
+unreadable stored data no longer count as colonization-eligible.
+
+### Changed
+- **Eligibility has three states.** A system with missing, malformed or
+  non-object stored data is now *unknown*, not eligible: it's excluded from
+  the Candidates and Densest Systems rankings (the log reports how many) and
+  isn't treated as an occupied system by the reachability check. A
+  well-formed record with no government field is still eligible.
+- The status bar describes how the last run ended (completed, failed,
+  completed but skipped unreadable records, cancelled) instead of showing a
+  bare exit code.
+
+### Fixed
+- A job that hit an unexpected error reported success (exit 0); it now
+  reports failure (exit 1), and results from a failed run aren't loaded.
+- Extraction: a failed final write returned success and could leave the
+  database open; it now fails, closes the connection, and reports which
+  sector failed (other sectors are still written).
+- Extraction: unreadable lines in the galaxy dump were skipped silently.
+  They're now counted and listed in the log, and the run exits with code 3
+  (its databases are still offered to the Run tab). `--strict` stops at the
+  first one instead.
+- Extraction: a new sector database is built as `.partial` and renamed only
+  when the run completes, so a cancelled or failed extraction no longer
+  leaves a half-written database that looks complete.
+- Extraction: `--limit 1` extracted nothing in the single-sector script;
+  `--limit N` now means "scan N records" in both scripts. The multi-sector
+  script now honors its body and ring commit thresholds.
+- Extraction: systems with a missing or invalid coordinate are stored with
+  empty coordinates (and counted) instead of a partial position that crashed
+  the reachability graph. The loader also leaves out such rows from older
+  databases.
+- Extraction: the `ring_class`, `mass_mt`, `inner_rad` and `outer_rad`
+  columns were always empty because the extractor looked for the wrong
+  Spansh keys. New extractions fill them; older databases keep working
+  because the app reads ring details from `raw_json`.
+- Scoring a very large reachable set failed with "too many SQL variables";
+  scoring and the densest-systems report now stage the system list in a
+  temporary table.
+- Sector databases are opened read-only for analysis, and a missing database
+  path is reported instead of silently creating an empty file.
+- A zero, negative, infinite or non-numeric jump range, or a negative or
+  fractional hop cap, is now rejected with a clear error.
+
 ## [1.0.0] - 2026-08-07
 
 First packaged release: a standalone Windows executable, an automated test

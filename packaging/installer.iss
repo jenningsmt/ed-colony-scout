@@ -14,7 +14,7 @@
 ; FileVersion/ProductVersion and gui/config.py's APP_VERSION when cutting a
 ; new release.
 #define MyAppName "ED Colony Scout"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppExeName "ED Colony Scout.exe"
 
 [Setup]

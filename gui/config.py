@@ -16,7 +16,7 @@ from typing import Any
 APP_NAME = "EDColonyScout"
 
 # Displayed in the window title.
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 
 def _default_out_dir() -> str:
