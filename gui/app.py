@@ -14,7 +14,7 @@ from gui import config as config_module
 from gui import db_lookup, pipeline, system_detail, treeview_utils
 from gui import rubric as rubric_module
 from gui.treeview_utils import ColumnSpec
-from gui.worker import DONE_SENTINEL, Worker
+from gui.worker import DONE_SENTINEL, Worker, describe_exit
 
 MAX_LOG_LINES = 5000
 POLL_INTERVAL_MS = 100
@@ -893,7 +893,7 @@ class App:
 
     def _on_job_done(self, returncode: str) -> None:
         self._set_controls_running(False)
-        self.status_label.configure(text=f"Idle (last run exit={returncode})")
+        self.status_label.configure(text=f"Idle (last run {describe_exit(returncode)})")
 
         if returncode == "0" and self._pending_result_paths is not None:
             candidates_path, dense_path = self._pending_result_paths
@@ -905,7 +905,8 @@ class App:
                 messagebox.showerror("Load failed", f"Could not load results:\n\n{exc}")
         self._pending_result_paths = None
 
-        if returncode == "0" and self._pending_extracted_db_paths is not None:
+        # Extraction also publishes its databases on 3 (some unreadable dump records, reported in the log).
+        if returncode in ("0", "3") and self._pending_extracted_db_paths is not None:
             self._offer_extracted_dbs(self._pending_extracted_db_paths)
         self._pending_extracted_db_paths = None
 

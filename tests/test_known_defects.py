@@ -45,7 +45,6 @@ def _count_systems(db: Path) -> int:
 
 
 class WorkerStatusTests(unittest.TestCase):
-    @known_defect
     def test_exception_reports_failure_status(self):
         """E01: a job that raises must not finish with __job_done__:0."""
         w = worker_module.Worker()
@@ -78,7 +77,6 @@ class ExtractionDefectTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    @known_defect
     def test_final_flush_failure_returns_nonzero(self):
         """E01: a failed final flush in the multi-sector extractor must not return 0."""
         _write_jsonl(self.dump, [json.dumps(_system())])
@@ -102,7 +100,6 @@ class ExtractionDefectTests(unittest.TestCase):
             for sink in sinks:
                 sink.conn.close()
 
-    @known_defect
     def test_corrupt_jsonl_line_is_reported(self):
         """E02: a malformed line must be counted and reported, not skipped silently."""
         _write_jsonl(self.dump, [json.dumps(_system()), "{invalid json}", json.dumps(_system("Audit AA-A a1", 2))])
@@ -113,7 +110,6 @@ class ExtractionDefectTests(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("rejected", log.getvalue().lower())
 
-    @known_defect
     def test_limit_one_extracts_one_system(self):
         """P2: limit=1 must extract one record, not zero."""
         _write_jsonl(self.dump, [json.dumps(_system())])
@@ -124,7 +120,6 @@ class ExtractionDefectTests(unittest.TestCase):
 
 
 class CatalogInputTests(unittest.TestCase):
-    @known_defect
     def test_missing_coordinate_is_quarantined_by_loader(self):
         """E02: a stored (0, None, 0) position must not reach the graph builder."""
         row, _, _ = extractor.process_system(_system(coords={"x": 0, "y": None, "z": 0}), "Audit", True)
@@ -140,14 +135,12 @@ class CatalogInputTests(unittest.TestCase):
             self.assertTrue(all(isinstance(v, float) for v in coord))
         reach.build_adjacency(merged.coords, 15.0)
 
-    @known_defect
     def test_malformed_metadata_is_not_eligible(self):
         """E02 / D2: malformed or non-object raw_json is unknown, never eligible, and never raises."""
         for raw in ("{broken", "[]", "null"):
             with self.subTest(raw=raw):
                 self.assertIsNot(reach.is_colonization_eligible(raw), True)
 
-    @known_defect
     def test_invalid_jump_radius_is_rejected(self):
         """E02: zero, negative, infinite and NaN radii must raise ValueError."""
         for radius in (0.0, -15.0, float("inf"), float("nan")):
@@ -165,7 +158,6 @@ class CatalogInputTests(unittest.TestCase):
 
 
 class ScoringParameterLimitTests(unittest.TestCase):
-    @known_defect
     def test_scoring_accepts_more_keys_than_sqlite_variable_limit(self):
         """E05: scoring must not build one IN (...) parameter per key."""
         conn = sqlite3.connect(":memory:")

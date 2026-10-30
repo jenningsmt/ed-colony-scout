@@ -70,23 +70,19 @@ class ExtractionFixtureTests(unittest.TestCase):
         self.assertIsNone(gov_by_name[fixtures.ORIGIN])
         self.assertIsNone(gov_by_name[fixtures.RICH])
 
-    def test_ring_flattened_columns_are_null_known_extraction_quirk(self) -> None:
-        """Pins the pre-existing key-casing mismatch documented in
-        gui/db_lookup.py: the extractor looks for ringClass/massMT/innerRad,
-        but real Spansh ring JSON uses type/mass/innerRadius/outerRadius, so
-        these flattened columns come out NULL. If this test ever starts
-        failing because someone fixed the extractor, that's good news --
-        update this test (and gui/db_lookup.py's raw_json-based workaround
-        can likely be simplified back to reading the flattened columns)."""
+    def test_ring_flattened_columns_use_spansh_keys(self) -> None:
+        """The extractor reads Spansh's type/mass/innerRadius/outerRadius
+        into the flattened ring columns (they were NULL before v1.1.0, so
+        gui/db_lookup.py still reads raw_json for older databases)."""
         rows = self._query(
             "SELECT ring_name, ring_class, mass_mt, inner_rad, outer_rad, raw_json FROM rings"
         )
         self.assertEqual(len(rows), 1)
         ring_name, ring_class, mass_mt, inner_rad, outer_rad, raw_json = rows[0]
-        self.assertIsNone(ring_class)
-        self.assertIsNone(mass_mt)
-        self.assertIsNone(inner_rad)
-        self.assertIsNone(outer_rad)
+        self.assertEqual(ring_class, fixtures.ICY_RING["type"])
+        self.assertEqual(mass_mt, fixtures.ICY_RING["mass"])
+        self.assertEqual(inner_rad, fixtures.ICY_RING["innerRadius"])
+        self.assertEqual(outer_rad, fixtures.ICY_RING["outerRadius"])
         data = json.loads(raw_json)
         self.assertEqual(data["type"], "Icy")
         self.assertEqual(data["mass"], 228600000000.0)

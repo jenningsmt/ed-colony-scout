@@ -37,12 +37,20 @@ class ScoringMathTests(unittest.TestCase):
         self.assertEqual(reach.score_ring(1.0, "Icy", rubric), 25.0)  # ratio 1.0 -> base points exactly
 
     def test_is_colonization_eligible(self) -> None:
-        self.assertTrue(reach.is_colonization_eligible(None))
-        self.assertTrue(reach.is_colonization_eligible("{}"))
+        self.assertTrue(reach.is_colonization_eligible("{}"))  # no government field: the dump's best signal
         self.assertTrue(reach.is_colonization_eligible('{"government": "None"}'))
         self.assertTrue(reach.is_colonization_eligible('{"government": null}'))
         self.assertFalse(reach.is_colonization_eligible('{"government": "Democracy"}'))
-        self.assertTrue(reach.is_colonization_eligible("not json"))  # malformed -> defaults eligible
+        # Unknown is never eligible (v1.1.0; these defaulted to eligible before).
+        self.assertFalse(reach.is_colonization_eligible(None))
+        self.assertFalse(reach.is_colonization_eligible("not json"))
+
+    def test_colonization_status_has_three_states(self) -> None:
+        self.assertEqual(reach.colonization_status('{"government": "None"}'), reach.ELIGIBLE)
+        self.assertEqual(reach.colonization_status('{"government": "Feudal"}'), reach.INELIGIBLE)
+        for raw in (None, "", "not json", "[]", "null", "42"):
+            with self.subTest(raw=raw):
+                self.assertEqual(reach.colonization_status(raw), reach.UNKNOWN)
 
     def test_build_key_scoring_factors_orders_by_contribution(self) -> None:
         factors = reach.build_key_scoring_factors({

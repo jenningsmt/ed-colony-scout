@@ -144,15 +144,15 @@ def run_sector_extraction_pipeline(
         output_dir=out_dir,
         cancel_event=cancel_event,
     )
-    if rc != 0:
-        return rc  # 130 (cancelled) or 1 (input/format error) propagate as-is
+    if rc not in (extract_multi_sector_to_sqlite.EXIT_OK, extract_multi_sector_to_sqlite.EXIT_REJECTED_RECORDS):
+        return rc  # 130 (cancelled) or 1 (input/format/write error) propagate as-is
 
     db_paths = [
         str(out_dir / f"sector_{extract_multi_sector_to_sqlite.sanitize_prefix(p)}.sqlite")
         for p in prefixes
     ]
     print(f"{EXTRACT_RESULT_SENTINEL}:{EXTRACT_RESULT_SEP.join(db_paths)}")
-    return 0
+    return rc  # 3 = written, but some dump records were unreadable (see the log)
 
 
 def run_shortest_path_pipeline(

@@ -148,13 +148,13 @@ def _parse_body_detail(body_name: str, body_type: Optional[str], sub_type: Optio
 
 
 def _parse_ring_detail(body_name: str, ring_name: str, raw_json: Optional[str]) -> RingDetail:
-    """rings.ring_class/mass_mt/inner_rad/outer_rad are unreliable (a
-    pre-existing extraction key-casing mismatch leaves them NULL for every
-    ring in every sector DB observed so far -- the extractor looks for
-    ringClass/massMT/innerRad, but Spansh's actual keys are type/mass/
-    innerRadius/outerRadius). scripts/colonization_reachability_export.py's
-    extract_dense_system_details() already works around this by reading
-    rings.raw_json directly; this does the same."""
+    """Reads ring details from rings.raw_json rather than the flattened
+    ring_class/mass_mt/inner_rad/outer_rad columns: databases extracted
+    before v1.1.0 have those columns NULL (the extractor looked for
+    ringClass/massMT/innerRad instead of Spansh's type/mass/innerRadius/
+    outerRadius). raw_json is correct for old and new databases alike;
+    scripts/colonization_reachability_export.py's
+    extract_dense_system_details() does the same."""
     ring_class: Optional[str] = None
     mass_mt: Optional[float] = None
     inner_rad: Optional[float] = None

@@ -52,6 +52,7 @@ from typing import Optional
 
 try:
     from scripts.colonization_reachability_export import (
+        INELIGIBLE,
         build_adjacency,
         distance_3d,
         load_merged_systems,
@@ -59,6 +60,7 @@ try:
     from scripts.extract_sector_systems_to_sqlite import sanitize_prefix
 except ImportError:
     from colonization_reachability_export import (
+        INELIGIBLE,
         build_adjacency,
         distance_3d,
         load_merged_systems,
@@ -77,6 +79,8 @@ def bfs_with_parents(
     but also tracks a parent pointer per visited node (root's own parent is
     None), so a path back to the root can be reconstructed afterward.
     max_hops=None means unbounded -- explore the whole connected component."""
+    if max_hops is not None and (isinstance(max_hops, bool) or not isinstance(max_hops, int) or max_hops < 0):
+        raise ValueError(f"max hops must be a whole number of 0 or more, not {max_hops!r}")
     dist: dict[int, int] = {root_idx: 0}
     parent: dict[int, Optional[int]] = {root_idx: None}
     q = deque([root_idx])
@@ -122,16 +126,17 @@ def _build_name_index(names: list[str]) -> dict[str, int]:
 def _nearest_occupied(
     target_idx: int,
     coords: list[tuple[float, float, float]],
-    eligible: list[bool],
+    occupied: list[bool],
     count: int,
 ) -> list[int]:
-    """Indices of the `count` nearest occupied (not colonization-eligible)
-    systems to target_idx by straight-line distance, ascending, excluding
+    """Indices of the `count` nearest occupied (inhabited/claimed; not
+    merely of unknown status) systems to target_idx by straight-line
+    distance, ascending, excluding
     target_idx itself. Simple O(n) scan + sort -- an interactive one-off
     query, not perf-critical, no spatial index needed (unlike the
     hop-adjacency grid, which IS reused as-is via build_adjacency)."""
     target_coords = coords[target_idx]
-    occupied_idxs = [i for i in range(len(coords)) if not eligible[i] and i != target_idx]
+    occupied_idxs = [i for i in range(len(coords)) if occupied[i] and i != target_idx]
     occupied_idxs.sort(key=lambda i: distance_3d(target_coords, coords[i]))
     return occupied_idxs[:count]
 
@@ -142,7 +147,7 @@ def _path_rows(
     path_idxs: list[int],
     names: list[str],
     coords: list[tuple[float, float, float]],
-    eligible: list[bool],
+    occupied: list[bool],
 ) -> list[dict]:
     """Shared path row shape (hop, system_name, x, y, z, leg_distance_ly,
     occupied) for a path already in launch-point-first order. Hop 0's
@@ -157,7 +162,7 @@ def _path_rows(
             "system_name": names[idx],
             "x": x, "y": y, "z": z,
             "leg_distance_ly": round(leg, 2),
-            "occupied": not eligible[idx],
+            "occupied": occupied[idx],
         })
         prev_coords = (x, y, z)
     return rows
@@ -208,7 +213,8 @@ def shortest_path(
     print()
 
     print("Loading systems...")
-    keys, names, coords, eligible, key_to_db_idx = load_merged_systems(db_paths)
+    keys, names, coords, eligible, key_to_db_idx, status = load_merged_systems(db_paths)
+    occupied = [st == INELIGIBLE for st in status]
     print(f"  {len(keys):,} systems loaded total.")
 
     name_to_idx = _build_name_index(names)
@@ -236,7 +242,7 @@ def shortest_path(
 
     hop_count = dist[target_idx]
     path_idxs = reconstruct_path(parent, target_idx)  # BFS root == origin: already origin-to-target order
-    path_rows = _path_rows(path_idxs, names, coords, eligible)
+    path_rows = _path_rows(path_idxs, names, coords, occupied)
     print(f"  Found: {hop_count} hop(s).")
 
     result = {
@@ -270,7 +276,8 @@ def check_reachable(
     print()
 
     print("Loading systems...")
-    keys, names, coords, eligible, key_to_db_idx = load_merged_systems(db_paths)
+    keys, names, coords, eligible, key_to_db_idx, status = load_merged_systems(db_paths)
+    occupied = [st == INELIGIBLE for st in status]
     print(f"  {len(keys):,} systems loaded total.")
 
     name_to_idx = _build_name_index(names)
@@ -284,7 +291,7 @@ def check_reachable(
     print(f"  {edge_count:,} edges (<= {max_jump_ly} ly apart).")
 
     print(f"Finding {candidate_count} nearest occupied system(s) to {target_system!r}...")
-    candidate_idxs = _nearest_occupied(target_idx, coords, eligible, candidate_count)
+    candidate_idxs = _nearest_occupied(target_idx, coords, occupied, candidate_count)
     print(f"  {len(candidate_idxs)} candidate(s) found.")
 
     if not candidate_idxs:
@@ -325,7 +332,7 @@ def check_reachable(
         winner = min(qualifying, key=lambda c: c["hop_count"])
         path_idxs = reconstruct_path(parent, winner["_idx"])
         path_idxs.reverse()  # BFS root == target: reconstruct gives target-to-candidate; reverse for launch-first presentation
-        path_rows = _path_rows(path_idxs, names, coords, eligible)
+        path_rows = _path_rows(path_idxs, names, coords, occupied)
         best_candidate = {k: v for k, v in winner.items() if k != "_idx"}
         print(f"  Winner: {winner['system_name']} ({winner['hop_count']} hop(s)).")
     else:

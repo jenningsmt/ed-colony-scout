@@ -23,7 +23,10 @@ skipped, keeping the earlier DB's copy.
 Systems already claimed by a faction (systems.raw_json `government` field
 set to anything other than absent/"None") are kept in the reachability
 graph as hop-through waypoints but excluded from both output rankings,
-since an occupied system is not a valid colonization target.
+since an occupied system is not a valid colonization target. Systems whose
+stored metadata can't be read are treated the same way: unknown is not
+eligible. Systems without a valid stored position are left out of the
+graph and counted.
 
 The point values driving colonization_score (tier sizes and per-body/ring
 points) are configurable via the ScoringRubric dataclass -- see
@@ -118,21 +121,36 @@ class ScoringRubric:
 STOCK_RUBRIC = ScoringRubric()
 
 
-def is_colonization_eligible(raw_json: Optional[str]) -> bool:
-    """A system is only open for colonization if it has no established
-    government -- i.e. systems.raw_json's `government` field is absent or
-    the literal string "None". Anything else (Democracy, Feudal,
-    Dictatorship, Cooperative, ...) means the system is already
-    inhabited/claimed by a faction and is not a valid colonization target.
-    This rule is fixed and not part of ScoringRubric -- it's a game-mechanic
-    fact, not a scoring preference."""
+ELIGIBLE = "eligible"
+INELIGIBLE = "ineligible"
+UNKNOWN = "unknown"
+
+
+def colonization_status(raw_json: Optional[str]) -> str:
+    """ELIGIBLE if the system has no established government -- systems.
+    raw_json's `government` field is absent or the literal string "None".
+    Any other value (Democracy, Feudal, Dictatorship, Cooperative, ...)
+    means it's already inhabited/claimed by a faction: INELIGIBLE. Missing,
+    malformed or non-object raw_json is UNKNOWN, never eligible.
+
+    An absent government field in a well-formed record is the dump's best
+    available signal, not proof of current in-game status. This rule is
+    fixed and not part of ScoringRubric -- it's a game-mechanic fact, not a
+    scoring preference."""
     if not raw_json:
-        return True
+        return UNKNOWN
     try:
-        gov = json.loads(raw_json).get("government")
+        data = json.loads(raw_json)
     except (json.JSONDecodeError, TypeError):
-        return True
-    return gov is None or gov == "None"
+        return UNKNOWN
+    if not isinstance(data, dict):
+        return UNKNOWN
+    gov = data.get("government")
+    return ELIGIBLE if gov is None or gov == "None" else INELIGIBLE
+
+
+def is_colonization_eligible(raw_json: Optional[str]) -> bool:
+    return colonization_status(raw_json) == ELIGIBLE
 
 
 # ── Body/ring scoring ────────────────────────────────────────────────────
@@ -181,7 +199,10 @@ def build_adjacency(
 ) -> dict[int, list[int]]:
     """Grid-bucketed spatial adjacency: edge between any two points within
     max_jump_ly of each other. Cell size = max_jump_ly, 27-neighbor-cell
-    candidate check keeps this near-linear for realistically sparse sectors."""
+    candidate check keeps this near-linear for realistically sparse sectors.
+    Raises ValueError unless max_jump_ly is a finite number > 0."""
+    if not (isinstance(max_jump_ly, (int, float)) and math.isfinite(max_jump_ly) and max_jump_ly > 0):
+        raise ValueError(f"max jump must be a finite number of ly above 0, not {max_jump_ly!r}")
     cell = max_jump_ly
     grid: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     for i, (x, y, z) in enumerate(coords):
@@ -228,6 +249,8 @@ def bfs_hop_distances(
     max_hops: int,
 ) -> dict[int, int]:
     """Hop distance from origin_idx to every node reachable within max_hops."""
+    if isinstance(max_hops, bool) or not isinstance(max_hops, int) or max_hops < 0:
+        raise ValueError(f"max hops must be a whole number of 0 or more, not {max_hops!r}")
     dist: dict[int, int] = {origin_idx: 0}
     q = deque([origin_idx])
     while q:
@@ -251,8 +274,26 @@ class MergedSystems(NamedTuple):
     keys: list[str]
     names: list[str]
     coords: list[tuple[float, float, float]]
-    eligible: list[bool]
+    eligible: list[bool]            # status == ELIGIBLE
     key_to_db_idx: dict[str, int]   # system_key -> index into db_paths
+    status: list[str]               # ELIGIBLE / INELIGIBLE / UNKNOWN
+
+
+def connect_read_only(db_path: Path) -> sqlite3.Connection:
+    """Open an existing sector DB read-only. Raises FileNotFoundError for a
+    missing path instead of silently creating an empty database there."""
+    path = Path(db_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Sector DB not found: {path}")
+    return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+
+
+def _valid_position(x, y, z) -> Optional[tuple[float, float, float]]:
+    try:
+        point = (float(x), float(y), float(z))
+    except (TypeError, ValueError):
+        return None
+    return point if all(math.isfinite(v) for v in point) else None
 
 
 def load_merged_systems(db_paths: list[Path]) -> MergedSystems:
@@ -263,39 +304,54 @@ def load_merged_systems(db_paths: list[Path]) -> MergedSystems:
     system_key_for), so a key seen again from a later DB is a true cross-DB
     duplicate (rare -- sector-prefix matching in extract_multi_sector_to_
     sqlite.py is mutually exclusive) and is skipped defensively, keeping
-    the earlier DB's copy (db_paths order == precedence order)."""
+    the earlier DB's copy (db_paths order == precedence order).
+
+    Rows without three finite coordinates are left out and counted: a
+    system with no usable position can't be placed in the graph (which
+    doesn't mean it isn't there in game)."""
     keys: list[str] = []
     names: list[str] = []
     coords: list[tuple[float, float, float]] = []
-    eligible: list[bool] = []
+    status: list[str] = []
     key_to_db_idx: dict[str, int] = {}
     seen: set[str] = set()
 
     for db_idx, db_path in enumerate(db_paths):
-        conn = sqlite3.connect(str(db_path))
+        conn = connect_read_only(db_path)
         try:
             rows = conn.execute(
-                "SELECT system_key, name, x, y, z, raw_json FROM systems WHERE x IS NOT NULL"
+                "SELECT system_key, name, x, y, z, raw_json FROM systems ORDER BY rowid"
             ).fetchall()
         finally:
             conn.close()
         dup_count = 0
+        no_position = 0
         for key, name, x, y, z, raw_json in rows:
+            point = _valid_position(x, y, z)
+            if point is None:
+                no_position += 1
+                continue
             if key in seen:
                 dup_count += 1
                 continue
             seen.add(key)
             keys.append(key)
             names.append(name)
-            coords.append((x, y, z))
-            eligible.append(is_colonization_eligible(raw_json))
+            coords.append(point)
+            status.append(colonization_status(raw_json))
             key_to_db_idx[key] = db_idx
+        notes = []
+        if dup_count:
+            notes.append(f"{dup_count} skipped as cross-DB duplicates")
+        if no_position:
+            notes.append(f"{no_position} without a valid position, left out")
         print(
-            f"  {db_path.name}: {len(rows):,} systems"
-            + (f" ({dup_count} skipped as cross-DB duplicates)" if dup_count else "")
+            f"  {db_path.name}: {len(rows) - no_position:,} systems"
+            + (f" ({'; '.join(notes)})" if notes else "")
         )
 
-    return MergedSystems(keys, names, coords, eligible, key_to_db_idx)
+    eligible = [s == ELIGIBLE for s in status]
+    return MergedSystems(keys, names, coords, eligible, key_to_db_idx, status)
 
 
 def _partition_by_db(keys: list[str], key_to_db_idx: dict[str, int]) -> dict[int, list[str]]:
@@ -307,6 +363,20 @@ def _partition_by_db(keys: list[str], key_to_db_idx: dict[str, int]) -> dict[int
 
 # ── Data extraction for the reachable set ───────────────────────────────
 
+# Reachable sets can hold far more keys than SQLite allows as bound
+# parameters in one statement (32,766 by default), so the keys are staged in
+# a per-connection temp table and joined instead of listed in IN (?, ...).
+_STAGED_KEYS = "(SELECT system_key FROM temp.wanted_keys)"
+
+
+def _stage_keys(conn: sqlite3.Connection, keys: list[str]) -> None:
+    """Replace the contents of temp.wanted_keys with `keys` (duplicates
+    collapse). Works on read-only connections: temp tables live in a
+    separate temporary database."""
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS wanted_keys (system_key TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM temp.wanted_keys")
+    conn.executemany("INSERT OR IGNORE INTO temp.wanted_keys VALUES (?)", ((k,) for k in keys))
+
 def score_systems(
     conn: sqlite3.Connection,
     reachable_keys: list[str],
@@ -314,7 +384,7 @@ def score_systems(
     """Body/ring aggregation, scoped to just the reachable systems from ONE
     DB connection. Returns raw counts/ratios only -- point scoring (which
     depends on the active ScoringRubric) happens later in run()."""
-    placeholders = ",".join("?" for _ in reachable_keys)
+    _stage_keys(conn, reachable_keys)
     results: dict[str, dict] = {
         k: {
             "elw_count": 0, "ww_count": 0, "hmct_count": 0,
@@ -325,8 +395,7 @@ def score_systems(
 
     for system_key, body_type, sub_type, terraform_state in conn.execute(
         f"SELECT system_key, body_type, sub_type, terraform_state FROM bodies "
-        f"WHERE system_key IN ({placeholders})",
-        reachable_keys,
+        f"WHERE system_key IN {_STAGED_KEYS}"
     ):
         r = results.get(system_key)
         if r is None:
@@ -344,8 +413,7 @@ def score_systems(
 
     for system_key, raw_json in conn.execute(
         f"SELECT system_key, raw_json FROM rings "
-        f"WHERE system_key IN ({placeholders}) AND raw_json IS NOT NULL",
-        reachable_keys,
+        f"WHERE system_key IN {_STAGED_KEYS} AND raw_json IS NOT NULL"
     ):
         r = results.get(system_key)
         if r is None:
@@ -384,7 +452,7 @@ def score_systems_multi(
     are globally unique)."""
     merged: dict[str, dict] = {}
     for db_idx, sub_keys in _partition_by_db(reachable_keys, key_to_db_idx).items():
-        conn = sqlite3.connect(str(db_paths[db_idx]))
+        conn = connect_read_only(db_paths[db_idx])
         try:
             merged.update(score_systems(conn, sub_keys))
         finally:
@@ -402,7 +470,7 @@ def extract_dense_system_details(
     descriptive, not a qualification filter) with its MOI (surface density,
     kg/m^2, the same metric this project's sibling ring-density-monitor
     project calls MOI) and % delta vs the galactic median for its class."""
-    placeholders = ",".join("?" for _ in reachable_keys)
+    _stage_keys(conn, reachable_keys)
     details: dict[str, dict] = {
         k: {"stars": [], "planet_types": [], "rings": []}
         for k in reachable_keys
@@ -410,8 +478,7 @@ def extract_dense_system_details(
 
     for system_key, sub_type, raw_json in conn.execute(
         f"SELECT system_key, sub_type, raw_json FROM bodies "
-        f"WHERE system_key IN ({placeholders}) AND body_type = 'Star'",
-        reachable_keys,
+        f"WHERE system_key IN {_STAGED_KEYS} AND body_type = 'Star'"
     ):
         d = details.get(system_key)
         if d is None:
@@ -432,8 +499,7 @@ def extract_dense_system_details(
 
     for system_key, sub_type in conn.execute(
         f"SELECT system_key, sub_type FROM bodies "
-        f"WHERE system_key IN ({placeholders}) AND body_type = 'Planet'",
-        reachable_keys,
+        f"WHERE system_key IN {_STAGED_KEYS} AND body_type = 'Planet'"
     ):
         d = details.get(system_key)
         if d is None:
@@ -442,8 +508,7 @@ def extract_dense_system_details(
 
     for system_key, ring_name, raw_json in conn.execute(
         f"SELECT system_key, ring_name, raw_json FROM rings "
-        f"WHERE system_key IN ({placeholders}) AND raw_json IS NOT NULL",
-        reachable_keys,
+        f"WHERE system_key IN {_STAGED_KEYS} AND raw_json IS NOT NULL"
     ):
         d = details.get(system_key)
         if d is None:
@@ -512,7 +577,7 @@ def extract_dense_system_details_multi(
 ) -> dict[str, dict]:
     merged: dict[str, dict] = {}
     for db_idx, sub_keys in _partition_by_db(reachable_keys, key_to_db_idx).items():
-        conn = sqlite3.connect(str(db_paths[db_idx]))
+        conn = connect_read_only(db_paths[db_idx])
         try:
             merged.update(extract_dense_system_details(conn, sub_keys))
         finally:
@@ -594,7 +659,7 @@ def run(
     print()
 
     print("Loading systems...")
-    keys, names, coords, eligible, key_to_db_idx = load_merged_systems(db_paths)
+    keys, names, coords, eligible, key_to_db_idx, status = load_merged_systems(db_paths)
     n = len(keys)
     print(f"  {n:,} systems loaded total.")
 
@@ -621,12 +686,15 @@ def run(
 
     # Systems stay in the reachability graph as hop-through waypoints
     # regardless of ownership, but only ungoverned ("None" government)
-    # systems are valid colonization targets -- occupied systems are
-    # excluded from both output rankings below.
+    # systems are valid colonization targets -- occupied systems, and
+    # systems whose metadata can't be read, are excluded from both output
+    # rankings below.
     eligible_idxs = [i for i in reachable_idxs if eligible[i]]
-    excluded_count = len(reachable_idxs) - len(eligible_idxs)
+    occupied_count = sum(1 for i in reachable_idxs if status[i] == INELIGIBLE)
+    unknown_count = sum(1 for i in reachable_idxs if status[i] == UNKNOWN)
     print(f"  {len(eligible_idxs):,} of those are colonization-eligible "
-          f"(ungoverned); {excluded_count:,} excluded as already inhabited/claimed.")
+          f"(ungoverned); {occupied_count:,} excluded as already inhabited/claimed"
+          + (f"; {unknown_count:,} excluded because their stored data couldn't be read." if unknown_count else "."))
 
     print("Scoring reachable systems (bodies + rings)...")
     scored = score_systems_multi(db_paths, reachable_keys, key_to_db_idx)
