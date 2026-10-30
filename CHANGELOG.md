@@ -11,7 +11,7 @@ this project uses [Semantic Versioning](https://semver.org/).
 > string") rather than independently verified against a tag -- flagged here
 > so that inference isn't mistaken for a verified release record.
 
-## [1.1.0] - Unreleased
+## [1.1.0] - 2026-10-30
 
 Reliability fixes from an engineering review of the Zurara Bridge research
 tooling. Results on clean data are unchanged, except that systems with
