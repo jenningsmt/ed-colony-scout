@@ -458,6 +458,10 @@ maintained by others, freely made available to the community:
   it and *voluntarily* submit that discovery through an EDDN-compatible
   tool.
 
+## How this was built
+
+Built with AI-assisted development. I wrote the requirements, data model, and architecture rules, and directed AI coding assistants to implement them. Every change went through my review and the automated test suite, which also gates every release build.
+
 ## Legal
 
 *Elite Dangerous* is a trademark and copyright of **Frontier Developments
